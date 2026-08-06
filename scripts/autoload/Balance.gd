@@ -4,12 +4,20 @@ extends Node
 ## Everything designers will want to twiddle lives here so the sim code stays
 ## about *mechanism* and this file stays about *numbers*.
 ##
-## Design stance: this is a hopeful game. The ecology model underneath is a real
-## one and the population genuinely rises and falls with what the land can give
-## - but the land always comes back, the people always come back, and the long
-## trend is always upward. Bad stretches are pauses, never losses.
+## Design stance, in two halves:
+##
+## 1. It is hopeful. The ecology underneath is a real consumer-resource model
+##    and the population genuinely rises and falls with what the land gives -
+##    but the land always comes back, the people always come back, and the long
+##    trend is always upward. Bad stretches are pauses, never losses.
+##
+## 2. It is an idler. Costs grow geometrically while output grows linearly with
+##    what you own, so the next thing is always a little further away - and
+##    upgrades periodically double a trade outright and reset that curve. That
+##    is the Cookie Clicker engine: there is always a next purchase, the numbers
+##    never stop climbing, and nothing ever hard-caps.
 
-const SAVE_VERSION := 2
+const SAVE_VERSION := 3
 
 # --- Time -------------------------------------------------------------------
 ## Real seconds per in-game day at 1x speed.
@@ -24,6 +32,12 @@ const MAX_OFFLINE_HOURS := 12.0
 ## Ceiling on catch-up steps executed in a single frame, so a long offline
 ## credit or a stalled tab never freezes the game.
 const MAX_STEPS_PER_FRAME := 12
+## Offline catch-up runs the real simulation rather than approximating it, so
+## it has to be bounded or a twelve-hour absence would take minutes to load.
+## Steps get longer instead of more numerous; `MAX_OFFLINE_STEP_DAYS` keeps the
+## logistic integration well inside its stable range.
+const MAX_OFFLINE_STEPS := 6000
+const MAX_OFFLINE_STEP_DAYS := 2.0
 const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0]
 
 # --- Population -------------------------------------------------------------
@@ -34,8 +48,7 @@ const BIRTH_RATE_MAX := 0.030
 ## Baseline mortality, always present.
 const DEATH_RATE_BASE := 0.010
 ## Extra mortality when the tribe goes short. Deliberately gentle: hunger
-## should stop the tribe growing, not kill it off. Scarcity throttles births
-## hard and takes lives only slowly.
+## should stop the tribe growing, not kill it off.
 const DEATH_RATE_STARVATION := 0.028
 ## Births are throttled as the tribe fills its housing.
 const CROWDING_SOFTNESS := 0.35
@@ -79,8 +92,8 @@ const STOCK_REFUGE := 0.30
 const HABITAT_WEIGHT := 0.30
 
 const WATER_PER_CARRIER := 2.50
-const STONE_PER_QUARRIER := 0.55
-const ORE_PER_MINER := 0.42
+const STONE_PER_QUARRIER := 1.10
+const ORE_PER_MINER := 0.95
 ## Gold comes up alongside the ore, in far smaller quantities.
 const GOLD_PER_MINER := 0.045
 const KNOWLEDGE_PER_THINKER := 0.18
@@ -89,61 +102,50 @@ const KNOWLEDGE_PER_THINKER := 0.18
 const AMBIENT_KNOWLEDGE := 0.060
 
 const FARM_YIELD_PER_PLOT := 2.6
+## Managed timber, per worked woodlot row. Independent of the wild forest,
+## which is the whole point of it.
+const TIMBER_YIELD_PER_LOT := 2.0
 const BUILDER_WORK_PER_DAY := 1.0
+
+# --- Exploration ------------------------------------------------------------
+## Tiles one explorer reveals per day, before any tech multipliers.
+const EXPLORE_PER_SCOUT := 0.85
+## Explorers map as they go, and a map is knowledge.
+const KNOWLEDGE_PER_SCOUT := 0.05
+## How far past the worked territory the frontier must reach before the
+## settlement will claim more land. You cannot work what nobody has walked.
+const CLAIM_MARGIN := 1.5
+## Tiles revealed per simulation step, at most - keeps the reveal smooth and
+## the per-step cost bounded no matter how many explorers are out.
+const MAX_REVEALS_PER_STEP := 24
+
+# --- Stock targets ----------------------------------------------------------
+## With no ceilings, "enough" has to mean something else: the settlement
+## gathers a material until it holds this multiple of the priciest thing it
+## could currently build with it, then stops. That scales itself, and it is what
+## lets the forest grow back once there is more timber than anyone needs.
+const STOCK_TARGET_MULTIPLE := 2.5
+const STOCK_TARGET_FLOOR := 120.0
 
 # --- Storage ----------------------------------------------------------------
 ## Fraction of stored food lost per day before any preservation tech.
 const FOOD_SPOILAGE := 0.030
 
+## Nothing has a storage ceiling, and that is deliberate. A hard cap cannot
+## coexist with geometric costs: prices grow exponentially in what you own while
+## any cap grows at best linearly, so sooner or later there is a building nobody
+## can ever save up for and the game quietly stops. Perishables are held in
+## check by spoilage instead, which scales with the economy on its own - stock
+## settles where production equals decay. The rest simply accumulate.
 const RESOURCES := {
-	"food": {
-		"name": "Food",
-		"color": Color("d9a441"),
-		"base_cap": 150.0,
-		"spoilage": FOOD_SPOILAGE,
-	},
-	"water": {
-		"name": "Water",
-		"color": Color("4fa3d1"),
-		"base_cap": 100.0,
-		"spoilage": 0.02,
-	},
-	"wood": {
-		"name": "Wood",
-		"color": Color("8a6642"),
-		"base_cap": 150.0,
-		"spoilage": 0.0,
-	},
-	"stone": {
-		"name": "Stone",
-		"color": Color("9aa0a6"),
-		"base_cap": 120.0,
-		"spoilage": 0.0,
-	},
-	"hides": {
-		"name": "Hides",
-		"color": Color("b3714e"),
-		"base_cap": 80.0,
-		"spoilage": 0.008,
-	},
-	"ore": {
-		"name": "Ore",
-		"color": Color("c0724a"),
-		"base_cap": 100.0,
-		"spoilage": 0.0,
-	},
-	"gold": {
-		"name": "Gold",
-		"color": Color("e3c14f"),
-		"base_cap": 60.0,
-		"spoilage": 0.0,
-	},
-	"knowledge": {
-		"name": "Knowledge",
-		"color": Color("b08ad4"),
-		"base_cap": 0.0, # 0 means uncapped
-		"spoilage": 0.0,
-	},
+	"food": {"name": "Food", "color": Color("d9a441"), "base_cap": 0.0, "spoilage": FOOD_SPOILAGE},
+	"water": {"name": "Water", "color": Color("4fa3d1"), "base_cap": 0.0, "spoilage": 0.02},
+	"wood": {"name": "Wood", "color": Color("8a6642"), "base_cap": 0.0, "spoilage": 0.0},
+	"stone": {"name": "Stone", "color": Color("9aa0a6"), "base_cap": 0.0, "spoilage": 0.0},
+	"hides": {"name": "Hides", "color": Color("b3714e"), "base_cap": 0.0, "spoilage": 0.008},
+	"ore": {"name": "Ore", "color": Color("c0724a"), "base_cap": 0.0, "spoilage": 0.0},
+	"gold": {"name": "Gold", "color": Color("e3c14f"), "base_cap": 0.0, "spoilage": 0.0},
+	"knowledge": {"name": "Knowledge", "color": Color("b08ad4"), "base_cap": 0.0, "spoilage": 0.0}
 }
 
 const RESOURCE_ORDER: Array[String] = [
@@ -156,463 +158,667 @@ const RESOURCE_ORDER: Array[String] = [
 ## does. Highest tier whose tech is researched wins.
 const ORE_TIERS := [
 	{
-		"name": "Copper",
-		"requires": "prospecting",
-		"value": 1.0,
-		"color": Color("c0724a"),
-		"note": "Green-stained rock in the hillside, soft enough to beat into shape.",
+		"name": "Copper", "requires": "prospecting", "value": 1.0, "color": Color("c0724a"),
+		"note": "Green-stained rock in the hillside, soft enough to beat into shape."
 	},
 	{
-		"name": "Bronze",
-		"requires": "bronze_working",
-		"value": 2.0,
-		"color": Color("b08d57"),
-		"note": "Copper and tin together. Harder than either, and it holds an edge.",
+		"name": "Bronze", "requires": "bronze_working", "value": 2.0, "color": Color("b08d57"),
+		"note": "Copper and tin together. Harder than either, and it holds an edge."
 	},
 	{
-		"name": "Iron",
-		"requires": "iron_working",
-		"value": 3.4,
-		"color": Color("9aa4ad"),
-		"note": "Stubborn, plentiful, and better than bronze once you can get it hot enough.",
+		"name": "Iron", "requires": "iron_working", "value": 3.4, "color": Color("9aa4ad"),
+		"note": "Stubborn, plentiful, and better than bronze once you can get it hot enough."
+	},
+	{
+		"name": "Steel", "requires": "steelmaking", "value": 6.0, "color": Color("cfd6dd"),
+		"note": "Iron with the temper beaten into it. Nothing your neighbours have compares."
 	},
 ]
 
 # --- Jobs -------------------------------------------------------------------
 ## `kind` selects which production routine in Sim handles the job.
+## `glyph` and `color` are what the map draws, so a glance tells you who is
+## doing what and where they are doing it.
 const JOBS := {
 	"hunter": {
-		"name": "Hunters",
-		"kind": "game",
+		"name": "Hunters", "kind": "game", "requires": "",
 		"desc": "Track and kill wild game. Big yields, and the herds always come back.",
-		"requires": "",
+		"glyph": "bow", "color": Color("d98555"), "field": "game"
 	},
 	"forager": {
-		"name": "Foragers",
-		"kind": "forage",
+		"name": "Foragers", "kind": "forage", "requires": "",
 		"desc": "Gather berries, roots and nuts. Modest but dependable.",
-		"requires": "",
+		"glyph": "basket", "color": Color("9ecb6a"), "field": "forage"
 	},
 	"woodcutter": {
-		"name": "Woodcutters",
-		"kind": "forest",
+		"name": "Woodcutters", "kind": "forest", "requires": "",
 		"desc": "Fell trees for fuel and building. The forest regrows, given room.",
-		"requires": "",
+		"glyph": "axe", "color": Color("b98d5a"), "field": "forest"
 	},
 	"water_carrier": {
-		"name": "Water Carriers",
-		"kind": "water",
+		"name": "Water Carriers", "kind": "water", "requires": "",
 		"desc": "Haul water from the river and lakes. Yield depends on nearby water.",
-		"requires": "",
+		"glyph": "jug", "color": Color("5fb3e0"), "field": "water"
+	},
+	"explorer": {
+		"name": "Explorers", "kind": "explore", "requires": "",
+		"desc": "Walk out past the last known ridge. Reveals the map, and the settlement can only claim ground somebody has walked.",
+		"glyph": "staff", "color": Color("e0d05a"), "field": "frontier"
 	},
 	"farmer": {
-		"name": "Farmers",
-		"kind": "farm",
+		"name": "Farmers", "kind": "farm", "requires": "agriculture",
 		"desc": "Work the plots. Steady food that does not depend on the herds at all.",
-		"requires": "agriculture",
+		"glyph": "hoe", "color": Color("d4c14e"), "field": "farm"
+	},
+	"forester": {
+		"name": "Foresters", "kind": "timber", "requires": "agriculture",
+		"desc": "Work the woodlots: planted rows, cut on rotation. Timber that does not depend on the wild forest at all.",
+		"glyph": "axe", "color": Color("6fa85e"), "field": "farm",
 	},
 	"quarrier": {
-		"name": "Quarriers",
-		"kind": "stone",
-		"desc": "Cut stone from the hills for permanent building.",
-		"requires": "masonry",
+		"name": "Quarriers", "kind": "stone", "requires": "masonry",
+		"desc": "Cut stone from the hills. Needs a worked quarry face to stand at.",
+		"glyph": "chisel", "color": Color("b9bec4"), "field": "stone"
 	},
 	"miner": {
-		"name": "Miners",
-		"kind": "ore",
-		"desc": "Work the seams for metal, and whatever gold comes up with it.",
-		"requires": "prospecting",
+		"name": "Miners", "kind": "ore", "requires": "prospecting",
+		"desc": "Work the seams for metal, and whatever gold comes up with it. Needs a mine shaft.",
+		"glyph": "pick", "color": Color("c9803f"), "field": "ore"
 	},
 	"builder": {
-		"name": "Builders",
-		"kind": "build",
+		"name": "Builders", "kind": "build", "requires": "",
 		"desc": "Raise whatever is queued in the build orders.",
-		"requires": "",
+		"glyph": "hammer", "color": Color("d8a0d0"), "field": "home"
 	},
 	"thinker": {
-		"name": "Elders",
-		"kind": "knowledge",
+		"name": "Elders", "kind": "knowledge", "requires": "shared_stories",
 		"desc": "Remember, teach and puzzle things out. Generates Knowledge.",
-		"requires": "shared_stories",
-	},
+		"glyph": "scroll", "color": Color("b08ad4"), "field": "home"
+	}
 }
 
 const JOB_ORDER: Array[String] = [
-	"hunter", "forager", "woodcutter", "water_carrier",
-	"farmer", "quarrier", "miner", "builder", "thinker",
+	"hunter", "forager", "woodcutter", "water_carrier", "explorer",
+	"farmer", "forester", "quarrier", "miner", "builder", "thinker",
 ]
 
 # --- Buildings --------------------------------------------------------------
+## Costs are geometric: the nth of anything costs `cost x growth^n`. Output is
+## linear in how many you own. That gap is the whole idler engine - the next one
+## is always a little further off, and an upgrade that doubles a trade is
+## always worth more than the building it paid for.
+##
+## `max` is only set for things that are genuinely singular. Everything that
+## produces or houses is uncapped, so the numbers never stop.
+##
 ## effects:
-##   housing         - people supported
-##   storage         - {resource: added cap}
-##   yield_mult      - {job kind: multiplicative bonus}
-##   farm_plots      - farm capacity
-##   spoilage_mult   - multiplies food spoilage
-##   knowledge_mult  - multiplies knowledge output
-##   territory       - extra territory radius in tiles
+##   housing / storage / yield_mult / spoilage_mult / knowledge_mult / territory
+##   farm_plots  - farmer work slots
+##   mine_slots  - miner work slots
+##   quarry_slots- quarrier work slots
+##   woodlot_slots- forester work slots
+const DEFAULT_COST_GROWTH := 1.15
+
 const BUILDINGS := {
 	"firepit": {
 		"name": "Fire Pit",
 		"desc": "A hearth to cook at. Cooked food goes further and keeps longer.",
-		"cost": {"wood": 12.0},
-		"work": 4.0,
-		"requires": "",
-		"max": 1,
-		"effects": {"spoilage_mult": 0.75, "yield_mult": {"game": 1.10}},
+		"cost": {"wood": 12.0}, "work": 4.0, "requires": "", "max": 1,
+		"effects": {"spoilage_mult": 0.75, "yield_mult": {"game": 1.10}}
 	},
 	"windbreak": {
 		"name": "Windbreak",
 		"desc": "Hide and brush lean-tos. Barely shelter, but it is a start.",
-		"cost": {"wood": 10.0, "hides": 4.0},
-		"work": 4.0,
-		"requires": "",
-		"max": 10,
-		"effects": {"housing": 3.0},
+		"cost": {"wood": 10.0, "hides": 4.0}, "work": 4.0, "requires": "",
+		"growth": 1.13,
+		"effects": {"housing": 3.0}
 	},
 	"drying_rack": {
 		"name": "Drying Rack",
 		"desc": "Smoke and dry the kill. Food keeps through a bad month.",
-		"cost": {"wood": 20.0, "hides": 6.0},
-		"work": 6.0,
-		"requires": "preservation",
+		"cost": {"wood": 20.0, "hides": 6.0}, "work": 6.0, "requires": "preservation",
 		"max": 8,
-		"effects": {"storage": {"food": 90.0}, "spoilage_mult": 0.72},
+		"effects": {"spoilage_mult": 0.72}
 	},
 	"hut": {
 		"name": "Hut",
 		"desc": "A round timber hut. The moment the tribe stops moving.",
-		"cost": {"wood": 34.0, "hides": 8.0},
-		"work": 12.0,
-		"requires": "settlement",
-		"max": 40,
-		"effects": {"housing": 6.0},
+		"cost": {"wood": 34.0, "hides": 8.0}, "work": 12.0, "requires": "settlement",
+		"effects": {"housing": 6.0}
 	},
 	"woodshed": {
 		"name": "Woodshed",
-		"desc": "Somewhere to stack timber out of the rain.",
-		"cost": {"wood": 25.0},
-		"work": 7.0,
-		"requires": "settlement",
-		"max": 8,
-		"effects": {"storage": {"wood": 160.0}},
+		"desc": "Seasoned timber, stacked dry and ready. Everything gets built faster.",
+		"cost": {"wood": 25.0}, "work": 7.0, "requires": "settlement",
+		"effects": {"yield_mult": {"build": 1.12}}
+	},
+	"scout_camp": {
+		"name": "Scout Camp",
+		"desc": "A forward camp with dried meat and spare boots. Explorers range further from one.",
+		"cost": {"wood": 28.0, "hides": 10.0}, "work": 9.0, "requires": "",
+		"max": 10,
+		"effects": {"yield_mult": {"explore": 1.25}}
 	},
 	"farm_plot": {
 		"name": "Farm Plot",
 		"desc": "Broken ground, sown with saved grain. Food that does not run away.",
-		"cost": {"wood": 22.0, "stone": 6.0},
-		"work": 10.0,
-		"requires": "agriculture",
-		"max": 80,
-		"effects": {"farm_plots": 1.0},
+		"cost": {"wood": 22.0, "stone": 6.0}, "work": 10.0, "requires": "agriculture",
+		"effects": {"farm_plots": 1.0}
+	},
+	"woodlot": {
+		"name": "Woodlot",
+		"desc": "Planted rows cut on a rotation. Timber you grow instead of timber you find.",
+		"cost": {"wood": 30.0, "stone": 8.0}, "work": 11.0, "requires": "agriculture",
+		"effects": {"woodlot_slots": 1.0}
 	},
 	"well": {
 		"name": "Well",
 		"desc": "Dig for water instead of walking to it.",
-		"cost": {"wood": 20.0, "stone": 25.0},
-		"work": 14.0,
-		"requires": "masonry",
-		"max": 8,
-		"effects": {"yield_mult": {"water": 1.7}, "storage": {"water": 70.0}},
+		"cost": {"wood": 20.0, "stone": 25.0}, "work": 14.0, "requires": "masonry",
+		"max": 10,
+		"effects": {"yield_mult": {"water": 1.35}}
 	},
 	"longhouse": {
 		"name": "Longhouse",
 		"desc": "Many families under one roof, and somewhere to store the harvest.",
-		"cost": {"wood": 90.0, "stone": 30.0},
-		"work": 30.0,
-		"requires": "masonry",
-		"max": 24,
-		"effects": {"housing": 18.0, "storage": {"food": 60.0}},
+		"cost": {"wood": 90.0, "stone": 30.0}, "work": 30.0, "requires": "masonry",
+		"effects": {"housing": 18.0}
 	},
 	"granary": {
 		"name": "Granary",
 		"desc": "Raised stone store. A year of grain against a year of drought.",
-		"cost": {"wood": 60.0, "stone": 70.0},
-		"work": 28.0,
-		"requires": "pottery",
-		"max": 10,
-		"effects": {"storage": {"food": 320.0}, "spoilage_mult": 0.55},
+		"cost": {"wood": 60.0, "stone": 70.0}, "work": 28.0, "requires": "pottery",
+		"effects": {"spoilage_mult": 0.80}
 	},
 	"quarry": {
 		"name": "Quarry",
-		"desc": "A worked stone face in the hills.",
-		"cost": {"wood": 40.0},
-		"work": 18.0,
-		"requires": "masonry",
-		"max": 6,
-		"effects": {"yield_mult": {"stone": 1.5}, "storage": {"stone": 140.0}},
+		"desc": "A worked stone face in the hills. Somewhere for quarriers to stand.",
+		"cost": {"wood": 45.0}, "work": 18.0, "requires": "masonry",
+		"effects": {"quarry_slots": 2.0}
 	},
 	"mine": {
 		"name": "Mine",
 		"desc": "A shaft following the seam down. Whatever this age can work, this brings up.",
-		"cost": {"wood": 55.0, "stone": 40.0},
-		"work": 24.0,
-		"requires": "prospecting",
-		"max": 8,
-		"effects": {"yield_mult": {"ore": 1.55}, "storage": {"ore": 120.0, "gold": 40.0}},
+		"cost": {"wood": 55.0, "stone": 40.0}, "work": 24.0, "requires": "prospecting",
+		"effects": {"mine_slots": 2.0}
 	},
 	"smelter": {
 		"name": "Smelter",
 		"desc": "Charcoal, bellows and patience. Better metal means better everything.",
-		"cost": {"stone": 80.0, "wood": 70.0, "ore": 40.0},
-		"work": 32.0,
-		"requires": "bronze_working",
-		"max": 6,
+		"cost": {"stone": 80.0, "wood": 70.0, "ore": 40.0}, "work": 32.0,
+		"requires": "bronze_working", "max": 12,
 		"effects": {
-			"yield_mult": {"game": 1.10, "forest": 1.12, "stone": 1.12, "farm": 1.12, "ore": 1.10},
-			"storage": {"ore": 80.0},
-		},
+			"yield_mult": {"game": 1.08, "forest": 1.10, "stone": 1.10, "farm": 1.10, "ore": 1.10}
+			}
 	},
 	"stone_house": {
 		"name": "Stone House",
 		"desc": "Mortared walls and a tiled roof. These outlive the people who build them.",
-		"cost": {"stone": 120.0, "wood": 60.0, "ore": 30.0},
-		"work": 40.0,
+		"cost": {"stone": 120.0, "wood": 60.0, "ore": 30.0}, "work": 40.0,
 		"requires": "iron_working",
-		"max": 30,
-		"effects": {"housing": 30.0, "storage": {"food": 40.0}},
+		"effects": {"housing": 30.0}
 	},
 	"shrine": {
 		"name": "Shrine",
 		"desc": "Where the tribe keeps what it knows and what it fears.",
-		"cost": {"wood": 30.0, "stone": 20.0, "hides": 10.0},
-		"work": 20.0,
-		"requires": "shared_stories",
-		"max": 6,
-		"effects": {"knowledge_mult": 1.30},
+		"cost": {"wood": 30.0, "stone": 20.0, "hides": 10.0}, "work": 20.0,
+		"requires": "shared_stories", "max": 12,
+		"effects": {"knowledge_mult": 1.18}
 	},
 	"treasury": {
 		"name": "Treasury",
 		"desc": "Gold buys teachers, travellers, and news from far away.",
-		"cost": {"stone": 140.0, "gold": 60.0, "ore": 50.0},
-		"work": 45.0,
-		"requires": "coinage",
-		"max": 6,
-		"effects": {
-			"knowledge_mult": 1.45,
-			"storage": {"gold": 160.0},
-			"territory": 1.0,
-		},
+		"cost": {"stone": 140.0, "gold": 60.0, "ore": 50.0}, "work": 45.0,
+		"requires": "coinage", "max": 10,
+		"effects": {"knowledge_mult": 1.25, "territory": 0.5}
 	},
+	"great_hall": {
+		"name": "Great Hall",
+		"desc": "The building that says this place intends to still be here in a hundred years.",
+		"cost": {"stone": 400.0, "wood": 250.0, "ore": 180.0, "gold": 90.0}, "work": 90.0,
+		"requires": "steelmaking",
+		"effects": {"housing": 70.0, "knowledge_mult": 1.10}
+	}
 }
 
 const BUILDING_ORDER: Array[String] = [
-	"firepit", "windbreak", "drying_rack", "hut", "woodshed", "farm_plot",
-	"well", "longhouse", "granary", "quarry", "mine", "smelter",
-	"stone_house", "shrine", "treasury",
+	"firepit", "windbreak", "scout_camp", "drying_rack", "hut", "woodshed",
+	"farm_plot", "woodlot", "well", "longhouse", "granary", "quarry", "mine", "smelter",
+	"stone_house", "shrine", "treasury", "great_hall",
 ]
 
+# --- Upgrades ---------------------------------------------------------------
+## The other half of the idler engine. Every trade has a ladder of upgrades that
+## unlock once enough people work it, and each one *doubles* that trade's
+## output. Buildings creep; upgrades jump. Paid for in Knowledge, which is why
+## Elders and Shrines matter long after the tech tree is finished.
+const UPGRADE_MULT := 2.0
+## Unlocked by lifetime output, not by headcount. Gating on how many people
+## work a trade sounds natural and is a dead end: the labour planner only ever
+## hires what is needed, so a tier wanting three thousand foresters would never
+## unlock and the whole ladder would stall with the population standing idle.
+## Total ever produced always climbs, so there is always a next upgrade - which
+## is what keeps spare hands worth putting on Knowledge for ever.
+const UPGRADE_TIERS := [
+	{"output": 150.0, "cost": 60.0},
+	{"output": 1200.0, "cost": 300.0},
+	{"output": 9000.0, "cost": 1400.0},
+	{"output": 65000.0, "cost": 6500.0},
+	{"output": 450000.0, "cost": 30000.0},
+	{"output": 3.0e6, "cost": 140000.0},
+	{"output": 2.0e7, "cost": 650000.0},
+	{"output": 1.4e8, "cost": 3.0e6},
+	{"output": 9.0e8, "cost": 1.4e7},
+	{"output": 6.0e9, "cost": 6.5e7},
+	{"output": 4.0e10, "cost": 3.0e8},
+	{"output": 2.5e11, "cost": 1.4e9},
+]
+
+## Flavour per trade, indexed by tier. Cosmetic, but it is most of what makes
+## buying one feel like anything.
+const UPGRADE_NAMES := {
+	"game": ["Fire-Hardened Spears", "Drive Hunting", "The Atlatl", "Composite Bows", "Beaters and Nets", "Hunting Dogs", "Managed Herds", "Game Wardens", "Beast Trails", "The Hunting Reserve", "Selective Culling", "The Wild Register"],
+	"forage": ["Digging Sticks", "Reading the Season", "Woven Panniers", "Seed Selection", "Orchard Grafting", "Kitchen Gardens", "Tended Groves", "The Herbal", "Botanic Survey", "Glasshouses", "Seed Vaults", "The Great Orchard"],
+	"timber": ["Straight Rows", "Coppice Rotation", "The Nursery", "Grafted Stock",
+		"Drying Sheds", "The Plantation", "Managed Rotation", "The Timber Estate",
+		"Mechanical Saws", "The Great Woodlot", "Seed Orchards", "The Forestry Board"],
+	"forest": ["Stone Axes", "Two-Handed Axes", "The Wedge", "Felling Teams", "River Driving", "The Pit Saw", "Coppice Rotation", "Managed Forestry", "Timber Rails", "The Sawmill", "Nursery Beds", "The Forest Office"],
+	"water": ["Gourd Carriers", "Yoked Pails", "Lined Cisterns", "The Shaduf", "Clay Pipe", "The Aqueduct", "Reservoirs", "The Waterworks", "Sluice Gates", "The Great Cistern", "Pressure Mains", "The Water Board"],
+	"explore": ["Cairns and Blazes", "The Stick Chart", "Scouting Parties", "Star Navigation", "Surveyed Roads", "The Great Survey", "Relay Riders", "The Atlas", "Survey Chains", "The Grand Expedition", "Ocean Charts", "The Cartographers"],
+	"farm": ["Sowing in Rows", "The Hoe", "Crop Rotation", "The Seed Drill", "Manuring", "Terracing", "The Heavy Plough", "Selective Breeding", "Four-Field Rotation", "The Threshing Floor", "Drained Fen", "The Estate"],
+	"stone": ["Wedge and Feather", "The Sledge", "Quarry Ramps", "The Crane", "Cut-Stone Standards", "Powder Charges", "Rail Trolleys", "The Stoneworks", "The Derrick", "Cut-to-Order", "Deep Quarries", "The Masons' Yard"],
+	"ore": ["Fire-Setting", "Timbered Shafts", "The Windlass", "Adits and Drainage", "The Blast Furnace", "Deep Shafts", "Ore Sorting", "The Foundry", "Pumped Shafts", "The Bloomery Row", "Assay Offices", "The Great Works"],
+	"build": ["Plumb and Line", "The Lever", "Scaffolding", "The Treadwheel", "Standard Timbers", "Master Masons", "The Guild", "The Works Office", "Drawn Plans", "The Crane Yard", "Prefabrication", "The Ministry of Works"],
+	"knowledge": ["Counting Sticks", "The Storyhouse", "Clay Tablets", "The Archive", "The Academy", "Observatories", "The Great Library", "The University", "The Scriptorium", "Endowed Chairs", "The Census", "The Royal Society"]
+}
+
 # --- Technology -------------------------------------------------------------
-## effects mirror building effects, plus `birth_mult`.
 const TECHS := {
 	"fire_mastery": {
-		"name": "Fire Mastery",
+		"name": "Fire Mastery", "cost": 8.0, "requires": [], "era": 0,
 		"desc": "Carry an ember, and the night is yours.",
-		"cost": 8.0,
-		"requires": [],
-		"era": 0,
-		"effects": {"yield_mult": {"game": 1.15}},
+		"effects": {"yield_mult": {"game": 1.15}}
 	},
 	"stone_tools": {
-		"name": "Knapped Tools",
+		"name": "Knapped Tools", "cost": 16.0, "requires": ["fire_mastery"], "era": 0,
 		"desc": "Sharp edges for every trade.",
-		"cost": 16.0,
-		"requires": ["fire_mastery"],
-		"era": 0,
-		"effects": {"yield_mult": {"game": 1.15, "forest": 1.30, "forage": 1.10}},
+		"effects": {"yield_mult": {"game": 1.15, "forest": 1.30, "forage": 1.10}}
+	},
+	"wayfinding": {
+		"name": "Wayfinding", "cost": 18.0, "requires": ["fire_mastery"], "era": 0,
+		"desc": "Cairns, blazed trees and a memory for ridgelines. Your explorers cover far more ground.",
+		"effects": {"yield_mult": {"explore": 1.6}}
 	},
 	"tracking": {
-		"name": "Tracking",
+		"name": "Tracking", "cost": 28.0, "requires": ["stone_tools"], "era": 0,
 		"desc": "Read the ground and the herd cannot hide.",
-		"cost": 28.0,
-		"requires": ["stone_tools"],
-		"era": 0,
-		"effects": {"yield_mult": {"game": 1.35}, "territory": 2.0},
+		"effects": {"yield_mult": {"game": 1.35}, "territory": 2.0}
 	},
 	"shared_stories": {
-		"name": "Shared Stories",
+		"name": "Shared Stories", "cost": 20.0, "requires": ["fire_mastery"], "era": 0,
 		"desc": "What one elder knows, everyone knows. Unlocks Elders and the Shrine.",
-		"cost": 20.0,
-		"requires": ["fire_mastery"],
-		"era": 0,
-		"effects": {},
+		"effects": {}
 	},
 	"preservation": {
-		"name": "Smoking & Drying",
+		"name": "Smoking & Drying", "cost": 34.0, "requires": ["fire_mastery"], "era": 0,
 		"desc": "Make the good months pay for the bad ones. Unlocks Drying Racks.",
-		"cost": 34.0,
-		"requires": ["fire_mastery"],
-		"era": 0,
-		"effects": {"storage": {"food": 40.0}},
+		"effects": {"spoilage_mult": 0.85}
 	},
 	"settlement": {
-		"name": "Settling Down",
+		"name": "Settling Down", "cost": 55.0, "requires": ["shared_stories", "preservation"], "era": 1,
 		"desc": "Stop following the herds. Unlocks Huts and Woodsheds.",
-		"cost": 55.0,
-		"requires": ["shared_stories", "preservation"],
-		"era": 1,
-		"effects": {"territory": 2.0, "birth_mult": 1.15},
+		"effects": {"territory": 2.0, "birth_mult": 1.15}
 	},
 	"basketry": {
-		"name": "Basketry",
+		"name": "Basketry", "cost": 48.0, "requires": ["settlement"], "era": 1,
 		"desc": "Woven carriers for everything worth carrying.",
-		"cost": 48.0,
-		"requires": ["settlement"],
-		"era": 1,
-		"effects": {"storage": {"food": 60.0, "water": 40.0}, "yield_mult": {"forage": 1.30}},
+		"effects": {"yield_mult": {"forage": 1.30}}
 	},
 	"prospecting": {
-		"name": "Prospecting",
+		"name": "Prospecting", "cost": 70.0, "requires": ["stone_tools", "settlement"], "era": 1,
 		"desc": "Learn which stones are worth breaking. Unlocks Miners and the Mine.",
-		"cost": 70.0,
-		"requires": ["stone_tools", "settlement"],
-		"era": 1,
-		"effects": {"territory": 1.0},
+		"effects": {"territory": 1.0}
+	},
+	"seafaring": {
+		"name": "Seafaring", "cost": 95.0, "requires": ["wayfinding", "settlement"], "era": 1,
+		"desc": "Hide boats and a nerve for open water. Explorers can finally cross to the far shore - which on a broken-up world is everything.",
+		"effects": {"yield_mult": {"explore": 1.2}}
 	},
 	"pottery": {
-		"name": "Pottery",
+		"name": "Pottery", "cost": 90.0, "requires": ["basketry"], "era": 1,
 		"desc": "Fired clay holds water, grain and the idea of a surplus. Unlocks Granaries.",
-		"cost": 90.0,
-		"requires": ["basketry"],
-		"era": 1,
-		"effects": {"storage": {"water": 60.0, "food": 60.0}, "spoilage_mult": 0.8},
+		"effects": {"spoilage_mult": 0.8}
 	},
 	"husbandry": {
-		"name": "Animal Husbandry",
+		"name": "Animal Husbandry", "cost": 115.0, "requires": ["settlement", "tracking"], "era": 1,
 		"desc": "Keep the herd instead of chasing it.",
-		"cost": 115.0,
-		"requires": ["settlement", "tracking"],
-		"era": 1,
-		"effects": {"yield_mult": {"game": 1.4}, "storage": {"hides": 50.0}},
+		"effects": {"yield_mult": {"game": 1.4}}
 	},
 	"agriculture": {
-		"name": "Agriculture",
+		"name": "Agriculture", "cost": 170.0, "requires": ["pottery"], "era": 2,
 		"desc": "Sow, wait, reap. The most important thing your people will ever learn. Unlocks Farmers and Farm Plots.",
-		"cost": 170.0,
-		"requires": ["pottery"],
-		"era": 2,
-		"effects": {"birth_mult": 1.2},
+		"effects": {"birth_mult": 1.2}
 	},
 	"masonry": {
-		"name": "Masonry",
+		"name": "Masonry", "cost": 200.0, "requires": ["agriculture"], "era": 2,
 		"desc": "Cut stone, stacked true. Unlocks Quarriers, Wells and Longhouses.",
-		"cost": 200.0,
-		"requires": ["agriculture"],
-		"era": 2,
-		"effects": {"storage": {"stone": 60.0}},
+		"effects": {"yield_mult": {"stone": 1.15}}
 	},
 	"irrigation": {
-		"name": "Irrigation",
+		"name": "Irrigation", "cost": 220.0, "requires": ["agriculture"], "era": 2,
 		"desc": "Lead the river to the field.",
-		"cost": 220.0,
-		"requires": ["agriculture"],
-		"era": 2,
-		"effects": {"yield_mult": {"farm": 1.5}, "territory": 2.0},
+		"effects": {"yield_mult": {"farm": 1.5}, "territory": 2.0}
+	},
+	"mountain_paths": {
+		"name": "Mountain Paths", "cost": 240.0, "requires": ["masonry", "wayfinding"], "era": 2,
+		"desc": "Cut steps, rope the bad pitches, cache food at the col. The high ground stops being a wall - explorers can cross it and quarriers can work it.",
+		"effects": {"yield_mult": {"stone": 1.2, "explore": 1.15}, "territory": 1.0}
 	},
 	"bronze_working": {
-		"name": "Bronze Working",
+		"name": "Bronze Working", "cost": 260.0, "requires": ["prospecting", "pottery"], "era": 2,
 		"desc": "Alloy copper with tin. Your miners start bringing up bronze, and the Smelter makes every trade sharper.",
-		"cost": 260.0,
-		"requires": ["prospecting", "pottery"],
-		"era": 2,
-		"effects": {"yield_mult": {"ore": 1.2}},
+		"effects": {"yield_mult": {"ore": 1.2}}
 	},
 	"the_plough": {
-		"name": "The Plough",
+		"name": "The Plough", "cost": 320.0, "requires": ["irrigation", "husbandry"], "era": 2,
 		"desc": "One person, one ox, ten times the ground.",
-		"cost": 320.0,
-		"requires": ["irrigation", "husbandry"],
-		"era": 2,
-		"effects": {"yield_mult": {"farm": 1.6}},
+		"effects": {"yield_mult": {"farm": 1.6}}
 	},
 	"writing": {
-		"name": "Writing",
+		"name": "Writing", "cost": 450.0, "requires": ["masonry", "the_plough"], "era": 3,
 		"desc": "Knowledge that outlives the person who had it.",
-		"cost": 450.0,
-		"requires": ["masonry", "the_plough"],
-		"era": 3,
-		"effects": {"knowledge_mult": 1.6, "territory": 3.0},
+		"effects": {"knowledge_mult": 1.6, "territory": 3.0}
 	},
 	"iron_working": {
-		"name": "Iron Working",
+		"name": "Iron Working", "cost": 600.0, "requires": ["bronze_working", "masonry"], "era": 3,
 		"desc": "Hotter fires, and a stubborner metal than bronze ever was. Your seams start yielding iron, and Stone Houses become possible.",
-		"cost": 600.0,
-		"requires": ["bronze_working", "masonry"],
-		"era": 3,
-		"effects": {"yield_mult": {"ore": 1.3, "stone": 1.25, "farm": 1.2}},
+		"effects": {"yield_mult": {"ore": 1.3, "stone": 1.25, "farm": 1.2}}
+	},
+	"cartography": {
+		"name": "Cartography", "cost": 520.0, "requires": ["writing", "seafaring"], "era": 3,
+		"desc": "Everything anyone has walked, drawn once and copied. Nobody ever has to find it twice.",
+		"effects": {"yield_mult": {"explore": 2.0}, "territory": 3.0, "knowledge_mult": 1.15}
 	},
 	"coinage": {
-		"name": "Coinage",
+		"name": "Coinage", "cost": 720.0, "requires": ["writing", "bronze_working"], "era": 4,
 		"desc": "Stamped gold. Wealth you can carry, count, and spend on people who know things. Unlocks the Treasury.",
-		"cost": 720.0,
-		"requires": ["writing", "bronze_working"],
-		"era": 4,
-		"effects": {"storage": {"gold": 80.0}, "knowledge_mult": 1.2},
+		"effects": {"knowledge_mult": 1.2}
 	},
+	"steelmaking": {
+		"name": "Steelmaking", "cost": 1100.0, "requires": ["iron_working", "coinage"], "era": 4,
+		"desc": "Iron with the temper beaten into it, and a Great Hall to prove it. Your seams start yielding steel.",
+		"effects": {"yield_mult": {"ore": 1.4, "build": 1.5, "farm": 1.25}}
+	}
 }
 
 const TECH_ORDER: Array[String] = [
-	"fire_mastery", "stone_tools", "tracking", "shared_stories", "preservation",
-	"settlement", "basketry", "prospecting", "pottery", "husbandry",
-	"agriculture", "masonry", "irrigation", "bronze_working", "the_plough",
-	"writing", "iron_working", "coinage",
+	"fire_mastery", "stone_tools", "wayfinding", "tracking", "shared_stories",
+	"preservation", "settlement", "basketry", "prospecting", "seafaring",
+	"pottery", "husbandry", "agriculture", "masonry", "irrigation",
+	"mountain_paths", "bronze_working", "the_plough", "writing", "iron_working",
+	"cartography", "coinage", "steelmaking",
 ]
 
 # --- Eras -------------------------------------------------------------------
-## Advancing an era is purely a recognition of what you have already done.
 const ERAS := [
 	{"name": "Nomadic Band", "techs": 0, "pop": 0},
 	{"name": "Semi-Settled Camp", "techs": 4, "pop": 18},
-	{"name": "Neolithic Village", "techs": 8, "pop": 45},
-	{"name": "Bronze Age Town", "techs": 13, "pop": 110},
-	{"name": "Iron Age City", "techs": 17, "pop": 280},
+	{"name": "Neolithic Village", "techs": 9, "pop": 45},
+	{"name": "Bronze Age Town", "techs": 15, "pop": 110},
+	{"name": "Iron Age City", "techs": 20, "pop": 280},
+	{"name": "Age of Steel", "techs": 23, "pop": 900},
+]
+
+## Population milestones. Purely for the pleasure of watching a number pass a
+## round mark, which in this genre is not a small thing.
+const MILESTONES := [
+	{"pop": 25, "text": "Twenty-five mouths. Somebody has started calling this place by a name."},
+	{"pop": 100, "text": "A hundred people. There are faces here you do not recognise."},
+	{"pop": 500, "text": "Five hundred. The smoke from the hearths is visible from the ridge."},
+	{"pop": 2000, "text": "Two thousand. This is a town by any measure anyone here would use."},
+	{"pop": 10000, "text": "Ten thousand. Ten thousand, from six people and a river."},
+	{"pop": 50000, "text": "Fifty thousand. The road out of the valley runs both ways now."},
+	{"pop": 250000, "text": "A quarter of a million souls under one set of walls."},
+	{"pop": 1000000, "text": "A million people. Whatever this is, it is no longer a settlement."},
 ]
 
 # --- World ------------------------------------------------------------------
-const WORLD_W := 48
-const WORLD_H := 32
+## Big enough that walking to the edge is a project, which is the point of
+## having explorers at all.
+const WORLD_W := 96
+const WORLD_H := 64
 const BASE_TERRITORY_RADIUS := 3.5
-## Territory also creeps outward as the population grows.
-const TERRITORY_PER_POP := 0.045
-const MAX_TERRITORY_RADIUS := 16.0
+const TERRITORY_PER_POP := 0.028
+const MAX_TERRITORY_RADIUS := 18.0
 
-enum Biome { OCEAN, LAKE, RIVER, BEACH, GRASSLAND, FOREST, WETLAND, HILLS, MOUNTAIN, DESERT }
+enum Biome {
+	OCEAN, LAKE, RIVER, COAST,
+	PLAINS, GRASSLAND, FOREST, RAINFOREST,
+	HILLS, MOUNTAIN, DESERT, TUNDRA, ICE,
+	## Woodland that has been felled or burned. Not a landform - a state. The
+	## tile remembers the forest it was and grows back into it.
+	CLEARING
+}
+
+## Below this fraction of its tree cover a wooded tile reads as cleared ground;
+## above the upper mark it has grown back. The gap is hysteresis, so a tile
+## being worked does not flicker between the two.
+const CLEARED_BELOW := 0.22
+const REGROWN_ABOVE := 0.55
+
+## World shapes. The generator reads `land`, `scale` and `caps` from here, so
+## adding a shape is a data edit.
+##   land  - roughly what fraction of the map ends up above sea level
+##   scale - noise frequency; low is few big masses, high is many small ones
+##   caps  - polar ice, which only makes sense on a whole-world map
+enum WorldType { EARTH, CONTINENTS, ISLANDS, ARCHIPELAGO }
+
+const WORLD_TYPES := [
+	{
+		"id": WorldType.EARTH, "name": "Earth",
+		"desc": "A whole world: several continents, real climate bands from the tropics to the poles, and ice at the top and bottom.",
+		"land": 0.34, "scale": 0.030, "caps": true, "climate": true, "rivers": 8
+	},
+	{
+		"id": WorldType.CONTINENTS, "name": "Continents",
+		"desc": "Two or three big landmasses with room to spread out. Climate bands and polar ice.",
+		"land": 0.46, "scale": 0.024, "caps": true, "climate": true, "rivers": 7
+	},
+	{
+		"id": WorldType.ISLANDS, "name": "Islands",
+		"desc": "A warm sea scattered with substantial islands. No poles - this is a close-up of one region, not a globe. You will want Seafaring.",
+		"land": 0.30, "scale": 0.055, "caps": false, "climate": false, "rivers": 4
+	},
+	{
+		"id": WorldType.ARCHIPELAGO, "name": "Archipelago",
+		"desc": "Hundreds of small islands and shallow water between them. Land is precious and Seafaring is not optional.",
+		"land": 0.22, "scale": 0.085, "caps": false, "climate": false, "rivers": 2
+	},
+]
 
 ## `ore` and `gold` are deposit richness, not depletable stocks - seams do not
 ## run dry at this timescale, which keeps the civilisation always able to grow.
 const BIOME_INFO := {
-	Biome.OCEAN: {"name": "Ocean", "color": Color("1d3c5c"), "water": 1.0, "game": 0.0, "forest": 0.0, "forage": 0.0, "fertility": 0.0, "stone": 0.0, "ore": 0.0, "gold": 0.0},
-	Biome.LAKE: {"name": "Lake", "color": Color("2f6b93"), "water": 1.0, "game": 6.0, "forest": 0.0, "forage": 4.0, "fertility": 0.0, "stone": 0.0, "ore": 0.0, "gold": 0.0},
-	Biome.RIVER: {"name": "River", "color": Color("3f83ab"), "water": 1.0, "game": 8.0, "forest": 0.0, "forage": 6.0, "fertility": 0.0, "stone": 0.0, "ore": 0.05, "gold": 0.35},
-	Biome.BEACH: {"name": "Shore", "color": Color("cbbd8f"), "water": 0.2, "game": 4.0, "forest": 2.0, "forage": 8.0, "fertility": 0.2, "stone": 0.1, "ore": 0.0, "gold": 0.05},
-	Biome.GRASSLAND: {"name": "Grassland", "color": Color("7d9b57"), "water": 0.0, "game": 26.0, "forest": 6.0, "forage": 14.0, "fertility": 1.0, "stone": 0.1, "ore": 0.05, "gold": 0.0},
-	Biome.FOREST: {"name": "Forest", "color": Color("3f6b3c"), "water": 0.0, "game": 34.0, "forest": 46.0, "forage": 26.0, "fertility": 0.6, "stone": 0.1, "ore": 0.05, "gold": 0.0},
-	Biome.WETLAND: {"name": "Wetland", "color": Color("55806a"), "water": 0.8, "game": 20.0, "forest": 14.0, "forage": 24.0, "fertility": 0.9, "stone": 0.0, "ore": 0.0, "gold": 0.05},
-	Biome.HILLS: {"name": "Hills", "color": Color("8a8763"), "water": 0.0, "game": 16.0, "forest": 16.0, "forage": 9.0, "fertility": 0.4, "stone": 1.0, "ore": 1.00, "gold": 0.20},
-	Biome.MOUNTAIN: {"name": "Mountain", "color": Color("6f6f74"), "water": 0.0, "game": 5.0, "forest": 4.0, "forage": 2.0, "fertility": 0.0, "stone": 1.6, "ore": 1.60, "gold": 0.45},
-	Biome.DESERT: {"name": "Desert", "color": Color("c2a267"), "water": 0.0, "game": 4.0, "forest": 1.0, "forage": 3.0, "fertility": 0.1, "stone": 0.3, "ore": 0.45, "gold": 0.15},
+	Biome.OCEAN: {
+		"name": "Ocean", "color": Color("1b3652"), "water": 1.0,
+		"game": 0.0, "forest": 0.0, "forage": 0.0, "fertility": 0.0, "stone": 0.0, "ore": 0.0, "gold": 0.0
+	},
+	Biome.LAKE: {
+		"name": "Lake", "color": Color("2f6b93"), "water": 1.0,
+		"game": 8.0, "forest": 0.0, "forage": 5.0, "fertility": 0.0, "stone": 0.0, "ore": 0.0, "gold": 0.0
+	},
+	Biome.RIVER: {
+		"name": "River", "color": Color("3f83ab"), "water": 1.0,
+		"game": 10.0, "forest": 0.0, "forage": 7.0, "fertility": 0.0, "stone": 0.0, "ore": 0.05, "gold": 0.35
+	},
+	Biome.COAST: {
+		"name": "Coast", "color": Color("cbbd8f"), "water": 0.25,
+		"game": 5.0, "forest": 2.0, "forage": 10.0, "fertility": 0.25, "stone": 0.1, "ore": 0.0, "gold": 0.05
+	},
+	Biome.PLAINS: {
+		"name": "Plains", "color": Color("9aae62"), "water": 0.0,
+		"game": 32.0, "forest": 4.0, "forage": 11.0, "fertility": 1.15, "stone": 0.1, "ore": 0.05, "gold": 0.0
+	},
+	Biome.GRASSLAND: {
+		"name": "Grassland", "color": Color("7d9b57"), "water": 0.0,
+		"game": 24.0, "forest": 7.0, "forage": 16.0, "fertility": 1.0, "stone": 0.1, "ore": 0.05, "gold": 0.0
+	},
+	Biome.FOREST: {
+		"name": "Forest", "color": Color("3f6b3c"), "water": 0.0,
+		"game": 34.0, "forest": 48.0, "forage": 26.0, "fertility": 0.6, "stone": 0.1, "ore": 0.05, "gold": 0.0
+	},
+	Biome.RAINFOREST: {
+		"name": "Rainforest", "color": Color("245a35"), "water": 0.35,
+		"game": 26.0, "forest": 62.0, "forage": 34.0, "fertility": 0.75, "stone": 0.05, "ore": 0.05, "gold": 0.10
+	},
+	Biome.HILLS: {
+		"name": "Hills", "color": Color("8a8763"), "water": 0.0,
+		"game": 16.0, "forest": 16.0, "forage": 9.0, "fertility": 0.4, "stone": 1.15, "ore": 1.05, "gold": 0.20
+	},
+	Biome.MOUNTAIN: {
+		"name": "Mountain", "color": Color("6f6f74"), "water": 0.0,
+		"game": 6.0, "forest": 4.0, "forage": 2.0, "fertility": 0.0, "stone": 1.9, "ore": 1.75, "gold": 0.50
+	},
+	Biome.DESERT: {
+		"name": "Desert", "color": Color("c9ab6d"), "water": 0.0,
+		"game": 5.0, "forest": 1.0, "forage": 3.0, "fertility": 0.1, "stone": 0.35, "ore": 0.50, "gold": 0.18
+	},
+	Biome.TUNDRA: {
+		"name": "Tundra", "color": Color("8d9a95"), "water": 0.1,
+		"game": 14.0, "forest": 3.0, "forage": 5.0, "fertility": 0.15, "stone": 0.4, "ore": 0.35, "gold": 0.08
+	},
+	Biome.ICE: {
+		"name": "Ice", "color": Color("dfe8ee"), "water": 0.3,
+		"game": 2.0, "forest": 0.0, "forage": 0.0, "fertility": 0.0, "stone": 0.0, "ore": 0.0, "gold": 0.0
+	},
+	Biome.CLEARING: {
+		"name": "Clearing", "color": Color("8a8a52"), "water": 0.0,
+		"game": 14.0, "forest": 6.0, "forage": 12.0, "fertility": 0.85, "stone": 0.1, "ore": 0.05, "gold": 0.0
+	}
 }
 
+# --- Animals ----------------------------------------------------------------
+## Wildlife you can actually see, as distinct from the abstract "game" stock the
+## economy runs on. Each kind lives where it would really live, wanders between
+## neighbouring tiles, and has a silhouette you can tell apart at a glance.
+##
+## `weight` biases how many of each the world holds; `needs_game` ties predators
+## to the herds they eat, so wolves thin out when the deer do.
+enum Animal { DEER, WOLF, RABBIT, BIRD }
+
+const ANIMALS := {
+	Animal.DEER: {
+		"name": "Deer", "color": Color("a5764a"), "weight": 1.0, "needs_game": 0.25,
+		"biomes": [Biome.FOREST, Biome.RAINFOREST, Biome.CLEARING, Biome.TUNDRA, Biome.HILLS]
+	},
+	Animal.WOLF: {
+		"name": "Wolves", "color": Color("6f7681"), "weight": 0.30, "needs_game": 0.55,
+		"biomes": [Biome.FOREST, Biome.HILLS, Biome.TUNDRA, Biome.MOUNTAIN, Biome.CLEARING]
+	},
+	Animal.RABBIT: {
+		"name": "Rabbits", "color": Color("c9b79a"), "weight": 1.15, "needs_game": 0.0,
+		"biomes": [Biome.PLAINS, Biome.GRASSLAND, Biome.CLEARING, Biome.DESERT, Biome.COAST]
+	},
+	Animal.BIRD: {
+		"name": "Birds", "color": Color("e6eef4"), "weight": 0.95, "needs_game": 0.0,
+		"biomes": [Biome.COAST, Biome.LAKE, Biome.RIVER, Biome.PLAINS, Biome.GRASSLAND,
+			Biome.RAINFOREST, Biome.FOREST, Biome.TUNDRA]
+	}
+}
+
+const ANIMAL_ORDER: Array[int] = [Animal.DEER, Animal.WOLF, Animal.RABBIT, Animal.BIRD]
+
+## How many creatures the map tracks at once. Purely cosmetic, so this is a
+## drawing budget rather than a simulation parameter - a fixed cost no matter
+## how large the civilisation grows.
+const MAX_ANIMALS := 72
+## Roughly how often a given animal wanders to a neighbouring tile, in days.
+const ANIMAL_MOVE_DAYS := 3.0
+## Animals repopulate and reshuffle on this cadence, in days.
+const ANIMAL_RESTOCK_DAYS := 6.0
+
+# --- Disasters --------------------------------------------------------------
+## Off by default, and deliberately so: the default game is a calm one you leave
+## running. Switched on in Settings they are setbacks, never defeats - the
+## never-lose floor still holds underneath them.
+const DISASTERS := {
+	"forest_fire": {
+		"name": "Forest Fire",
+		"text": "Fire runs through the timber on the ridge. It burns for three days.",
+		"weight": 1.0, "needs": "forest"
+	},
+	"flood": {
+		"name": "Flood",
+		"text": "The river comes up over its banks and takes the low ground with it.",
+		"weight": 1.0, "needs": "water"
+	},
+	"hurricane": {
+		"name": "Hurricane",
+		"text": "A storm comes in off the water and does not let up for two days.",
+		"weight": 0.7, "needs": "coast"
+	},
+	"tornado": {
+		"name": "Tornado",
+		"text": "A funnel drops out of a green sky and walks across the open ground.",
+		"weight": 0.8, "needs": "open"
+	}
+}
+
+## Mean days between disasters when they are switched on.
+const DISASTER_INTERVAL_DAYS := 140.0
+
 # --- Events -----------------------------------------------------------------
-## Minimum in-game days between random events.
 const EVENT_COOLDOWN_DAYS := 24.0
-## Chance per day of an event once off cooldown.
 const EVENT_CHANCE_PER_DAY := 0.06
+
 
 static func is_water_biome(b: int) -> bool:
 	return b == Biome.OCEAN or b == Biome.LAKE or b == Biome.RIVER
 
 
-## Format a number compactly for UI: 12.4, 1.2k, 3.4M.
+## Open water needs boats; lakes and rivers can be forded.
+static func is_deep_water(b: int) -> bool:
+	return b == Biome.OCEAN
+
+
+static func world_type_info(id: int) -> Dictionary:
+	for w in WORLD_TYPES:
+		if int(w["id"]) == id:
+			return w
+	return WORLD_TYPES[0]
+
+
+## Format a number compactly. Idle games live in this function - it has to stay
+## readable from six people all the way to nine figures.
 static func fmt(value: float, decimals: int = 1) -> String:
 	var a := absf(value)
-	if a >= 1_000_000.0:
-		return "%.2fM" % (value / 1_000_000.0)
-	if a >= 1_000.0:
-		return "%.2fk" % (value / 1_000.0)
+	if a >= 1e12:
+		return "%.2fT" % (value / 1e12)
+	if a >= 1e9:
+		return "%.2fB" % (value / 1e9)
+	if a >= 1e6:
+		return "%.2fM" % (value / 1e6)
+	if a >= 1000.0:
+		return "%.2fk" % (value / 1000.0)
 	if a < 10.0:
 		return String.num(value, decimals)
 	return String.num(value, 0)
+
+
+## Whole counts of people, which want separators rather than suffixes until
+## they get genuinely large.
+static func fmt_count(value: float) -> String:
+	if absf(value) >= 1e6:
+		return fmt(value)
+	var s := String.num(floorf(value), 0)
+	var out := ""
+	var c := 0
+	for i in range(s.length() - 1, -1, -1):
+		out = s[i] + out
+		c += 1
+		if c % 3 == 0 and i > 0:
+			out = "," + out
+	return out
 
 
 ## Format a per-day rate with an explicit sign.

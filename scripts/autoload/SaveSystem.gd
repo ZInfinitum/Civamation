@@ -22,7 +22,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_autosave_timer += delta
-	if _autosave_timer >= AUTOSAVE_SECONDS:
+	if _autosave_timer >= maxf(5.0, Settings.autosave_seconds):
 		_autosave_timer = 0.0
 		save_game()
 

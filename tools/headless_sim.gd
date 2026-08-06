@@ -26,7 +26,8 @@ func _ready() -> void:
 			seeds = int(args[i + 1])
 
 	for s in range(1, seeds + 1):
-		_run_seed(s * 1337, days)
+		# Cycle the world shapes so every generator path is covered.
+		_run_seed(s * 1337, days, (s - 1) % Balance.WORLD_TYPES.size())
 
 	_test_save_load()
 
@@ -40,13 +41,13 @@ func _ready() -> void:
 		get_tree().quit(1)
 
 
-func _run_seed(seed_value: int, days: int) -> void:
-	Sim.new_game(seed_value)
+func _run_seed(seed_value: int, days: int, world_type: int = 0) -> void:
+	Sim.new_game(seed_value, world_type)
 	Sim.speed_index = 0 # nothing should advance behind our back
 
 	print("")
-	print("=== seed %d ===" % seed_value)
-	print("day    pop    K     food   wood   ore    gold   herd  plants forest  techs era  metal    jobs")
+	print("=== seed %d, %s ===" % [seed_value, Balance.world_type_info(world_type)["name"]])
+	print("day    pop     K      food   wood   ore    gold   herd forest expl%  techs up era metal    jobs")
 
 	var peak_pop := Sim.population
 	var min_pop_after_peak := Sim.population
@@ -77,6 +78,9 @@ func _run_seed(seed_value: int, days: int) -> void:
 	var w := Sim.world
 	if Sim.population < 12.0:
 		_failures.append("seed %d: population stalled at %.1f" % [seed_value, Sim.population])
+	if w.explored_fraction() < 0.05:
+		_failures.append("seed %d: explorers mapped only %.1f%% of the world"
+				% [seed_value, w.explored_fraction() * 100.0])
 	if Sim.techs.size() < 6:
 		_failures.append("seed %d: only %d techs after %d days" % [seed_value, Sim.techs.size(), days])
 	# The promise: no run ever loses more than a quarter of its high-water mark.
@@ -105,7 +109,7 @@ func _run_seed(seed_value: int, days: int) -> void:
 func _test_save_load() -> void:
 	print("")
 	print("=== save / load round trip ===")
-	Sim.new_game(90210)
+	Sim.new_game(90210, Balance.WorldType.CONTINENTS)
 	Sim.simulate_days(400.0, true)
 	for id in ["firepit", "windbreak", "windbreak"]:
 		if Sim.can_build(id):
@@ -125,6 +129,9 @@ func _test_save_load() -> void:
 		"radius": Sim.world.territory_radius,
 		"terr": Sim.world.territory.size(),
 		"game0": float(Sim.world.game[Sim.world.territory[0]]),
+		"explored": Sim.world.explored_count,
+		"world_type": Sim.world.world_type,
+		"upgrades": Sim.upgrades.size(),
 	}
 	for id in Balance.RESOURCE_ORDER:
 		before["res_" + id] = float(Sim.resources[id])
@@ -136,7 +143,7 @@ func _test_save_load() -> void:
 		_failures.append("save/load: no save file was written")
 		return
 	# Wipe the state completely so a silent no-op load cannot pass this test.
-	Sim.new_game(11111)
+	Sim.new_game(11111, Balance.WorldType.ARCHIPELAGO)
 	if not SaveSystem.load_game():
 		_failures.append("save/load: load_game() reported failure")
 		return
@@ -154,6 +161,9 @@ func _test_save_load() -> void:
 		"radius": Sim.world.territory_radius,
 		"terr": Sim.world.territory.size(),
 		"game0": float(Sim.world.game[Sim.world.territory[0]]),
+		"explored": Sim.world.explored_count,
+		"world_type": Sim.world.world_type,
+		"upgrades": Sim.upgrades.size(),
 	}
 	for id in Balance.RESOURCE_ORDER:
 		after["res_" + id] = float(Sim.resources[id])
@@ -179,14 +189,14 @@ func _test_save_load() -> void:
 
 func _report() -> void:
 	var w := Sim.world
-	print("%-6d %-6.0f %-5.0f %-6.0f %-6.0f %-6.0f %-6.0f %-5.0f %-6.0f %-7.0f %-5d %-4d %-8s %s" % [
-		int(Sim.day), Sim.population, Sim.carrying_capacity,
-		Sim.resources["food"], Sim.resources["wood"],
-		Sim.resources["ore"], Sim.resources["gold"],
+	print("%-6d %-7s %-6s %-6s %-6s %-6s %-6s %-4.0f %-6.0f %-6.0f %-5d %-2d %-3d %-8s %s" % [
+		int(Sim.day), Balance.fmt_count(Sim.population), Balance.fmt(Sim.carrying_capacity),
+		Balance.fmt(Sim.resources["food"]), Balance.fmt(Sim.resources["wood"]),
+		Balance.fmt(Sim.resources["ore"]), Balance.fmt(Sim.resources["gold"]),
 		w.stock_health(w.game, w.game_cap) * 100.0,
-		w.stock_health(w.forage, w.forage_cap) * 100.0,
 		w.stock_health(w.forest, w.forest_cap) * 100.0,
-		Sim.techs.size(), Sim.era,
+		w.explored_fraction() * 100.0,
+		Sim.techs.size(), Sim.upgrades.size(), Sim.era,
 		Sim.ore_name() if Sim.job_unlocked("miner") else "-",
 		_job_summary(),
 	])

@@ -131,6 +131,40 @@ showed, because the balance harness had its own private build logic and the
 shipped game had none. The harness now drives the real `auto_build`, so what CI
 verifies is what players get.
 
+## The idler layer
+
+The ecology gives the game its shape; the economy gives it its pulse, and that
+half is Cookie Clicker's.
+
+**Costs are geometric, output is linear.** The nth of anything costs
+`base x 1.15^n` while producing the same as the first. So the next building is
+always a little further away, and the curve flattens - which is the setup, not
+the problem.
+
+**Upgrades are the punchline.** Every trade has a ladder of upgrades that each
+*double* its output outright. Buildings creep, upgrades jump, and a jump resets
+a flattening curve. That loop is what makes the numbers keep climbing.
+
+**Nothing has a storage cap**, and this is load-bearing. A ceiling cannot
+coexist with geometric costs: prices grow exponentially in what you own while
+any cap grows at best linearly, so every run eventually meets a price it can
+never save up for and quietly stops. An early build did exactly that - every
+world froze at 198 people because a hut cost more wood than the barns could
+hold. Perishables are bounded by spoilage instead, which self-scales: stock
+settles where production equals decay.
+
+**Upgrades unlock on lifetime output, not headcount.** Gating on "150 people
+must work this trade" sounds natural and is a second dead end: the labour
+planner only hires what is needed, so those tiers never unlock and the surplus
+population stands idle for ever. Total-ever-produced only ever climbs, so there
+is always a next upgrade - which is what keeps spare hands worth putting on
+Knowledge indefinitely.
+
+**Every wild resource needs a managed successor.** Hunting saturates, so
+farming exists. Wild timber saturates, so woodlots exist. Stone and ore never
+deplete. Any resource without an unbounded source becomes the wall the whole
+economy stops at - wood was exactly that until woodlots were added.
+
 ## Structure
 
 `Sim.gd` advances in fixed 0.1-day substeps regardless of frame rate, so the
