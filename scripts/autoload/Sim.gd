@@ -25,6 +25,8 @@ signal era_advanced(era: int)
 signal game_reset
 signal boon_appeared(id: String)
 signal ascended(points: float)
+signal council_opened(id: String)
+signal council_closed(id: String, choice: String, by_elders: bool)
 
 var world: CivWorld
 
@@ -79,6 +81,23 @@ var gross_by_job := {}
 ## One line explaining the labour planner's last decision. An automation you
 ## cannot interrogate is one you cannot trust.
 var plan_reason := ""
+
+# --- Player-only levers. The elders never touch any of these. ---
+## Active decree, or "". A commitment: big bonus, real penalty, cooldown.
+var decree := ""
+var decree_cooldown: float = 0.0
+## Open council question, if any, and how long is left to answer it.
+var council_id := ""
+var council_deadline: float = 0.0
+var council_answered := 0
+var council_by_elders := 0
+## Boons collected close together stack. This is the reward for watching.
+var momentum: int = 0
+var momentum_until: float = -1.0
+var festival_until: float = -1.0
+var festival_cooldown: float = 0.0
+## Founded by hand on walked ground. tile -> richness contribution.
+var outposts: Array[Dictionary] = []
 var log_entries: Array[Dictionary] = []
 
 # Cached readouts the UI wants but should not recompute.
@@ -101,6 +120,7 @@ var _mine_slots := 0.0
 var _quarry_slots := 0.0
 var _woodlot_slots := 0.0
 var _birth_mult := 1.0
+var _housing_mult := 1.0
 var _territory_bonus := 0.0
 
 ## Smoothed per-worker output each job is actually delivering. Potential yield
@@ -123,6 +143,10 @@ var _prev_jobs := {}
 var _legacy_mult := 1.0
 var _omen_until: float = -1.0
 var _boon_cooldown: float = Balance.BOON_INTERVAL_DAYS
+var _council_cooldown: float = Balance.COUNCIL_INTERVAL_DAYS
+## Two council outcomes leave a lasting mark rather than a one-off payout.
+var _mine_bonus_days: float = -1.0
+var _endowed := false
 var _csv: FileAccess = null
 var _explore_progress := 0.0
 var _seen_biomes: Array[int] = []
@@ -169,6 +193,20 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_omen_until = -1.0
 	_boon_cooldown = Balance.BOON_INTERVAL_DAYS
 	plan_reason = ""
+	decree = ""
+	decree_cooldown = 0.0
+	council_id = ""
+	council_deadline = 0.0
+	council_answered = 0
+	council_by_elders = 0
+	momentum = 0
+	momentum_until = -1.0
+	festival_until = -1.0
+	festival_cooldown = 0.0
+	outposts.clear()
+	_mine_bonus_days = -1.0
+	_endowed = false
+	_council_cooldown = Balance.COUNCIL_INTERVAL_DAYS * 0.6
 	history = {}
 	for series in Balance.HISTORY_SERIES:
 		history[series] = PackedFloat32Array()
@@ -295,6 +333,9 @@ func _step(dt: float, offline: bool = false) -> void:
 	_apply_storage(dt)
 	if not offline:
 		_maybe_event(dt)
+	decree_cooldown = maxf(0.0, decree_cooldown - dt)
+	festival_cooldown = maxf(0.0, festival_cooldown - dt)
+	_maybe_council(dt, offline)
 	if not offline:
 		_maybe_boon(dt)
 	if Settings.disaster_frequency > 0:
@@ -307,7 +348,10 @@ func _step(dt: float, offline: bool = false) -> void:
 ## past where somebody has actually walked. That gate is the entire reason
 ## explorers exist.
 func _update_territory() -> void:
-	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + _territory_bonus
+	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY
+	if decree != "":
+		bonus += float(Balance.DECREES[decree].get("territory", 0.0))
+	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + bonus
 	var walked := world.explored_radius - Balance.CLAIM_MARGIN
 	world.territory_radius = clampf(minf(want, walked),
 			Balance.BASE_TERRITORY_RADIUS, Balance.MAX_TERRITORY_RADIUS)
@@ -321,7 +365,10 @@ func expansion_blocked_by_exploration() -> bool:
 		return false
 	if not world.frontier_open():
 		return false
-	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + _territory_bonus
+	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY
+	if decree != "":
+		bonus += float(Balance.DECREES[decree].get("territory", 0.0))
+	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + bonus
 	return want > world.explored_radius - Balance.CLAIM_MARGIN
 
 
@@ -448,6 +495,12 @@ func _maybe_boon(dt: float) -> void:
 func collect_boon() -> bool:
 	if boon_id == "":
 		return false
+	# Caught one while the last was still counting: they compound.
+	if day < momentum_until:
+		momentum = mini(momentum + 1, Balance.MOMENTUM_MAX)
+	else:
+		momentum = 1
+	momentum_until = day + Balance.MOMENTUM_WINDOW_DAYS + Balance.MOMENTUM_DECAY_DAYS
 	var id := boon_id
 	boon_id = ""
 	boon_tile = -1
@@ -471,8 +524,28 @@ func collect_boon() -> bool:
 			for k in 20:
 				world.reveal_one()
 			add_log("The scholar draws what they remember of the country beyond, and moves on.", "good")
+		"master_mason":
+			for res in ["stone", "wood"]:
+				resources[res] += maxf(60.0, production[res] * 80.0)
+			add_log("The mason shows them a better way to lay a course, and moves on.", "good")
+		"seam_strike":
+			resources["ore"] += maxf(80.0, production["ore"] * 150.0)
+			resources["gold"] += maxf(5.0, production["gold"] * 100.0)
+			add_log("The seam runs richer than anyone dared hope.", "good")
+		"fair_season":
+			resources["food"] += maxf(120.0, production["food"] * 100.0)
+			for i in world.territory:
+				world.forage[i] = world.forage_cap[i]
+			add_log("A fair season. Everything ripens at once.", "good")
+	if momentum > 1:
+		add_log("That is %d in a row. Everything is running at %d%%." % [momentum,
+				int(round((1.0 + momentum * Balance.MOMENTUM_PER_BOON) * 100.0))], "good")
 	state_changed.emit()
 	return true
+
+
+func momentum_active() -> bool:
+	return momentum > 0 and day < momentum_until
 
 
 func omen_active() -> bool:
@@ -637,12 +710,271 @@ func _wreck_buildings(count: int) -> void:
 		_mods_dirty = true
 
 
+# --- Player-only levers -----------------------------------------------------
+## Everything below is deliberately outside the autopilot's reach. Not because
+## the code could not do it, but because none of it has a computable right
+## answer - each one is a commitment, a gamble, or a moment. That is the whole
+## reason a managed civilisation beats an unmanaged one.
+
+func can_set_decree() -> bool:
+	return decree_cooldown <= 0.0
+
+
+func set_decree(id: String) -> bool:
+	if not can_set_decree():
+		return false
+	if id != "" and not Balance.DECREES.has(id):
+		return false
+	if id == decree:
+		return true
+	decree = id
+	decree_cooldown = Balance.DECREE_SWITCH_COOLDOWN_DAYS
+	_mods_dirty = true
+	if id == "":
+		add_log("The decree is lifted. Everyone goes back to their own business.", "info")
+	else:
+		add_log("Decree: %s. %s" % [Balance.DECREES[id]["name"], Balance.DECREES[id]["desc"]], "era")
+	if auto_assign:
+		_auto_assign_jobs()
+	state_changed.emit()
+	return true
+
+
+## Spend a third of the granary on a party. No optimiser would; every
+## civilisation does; and the births and the ideas that come out of it are
+## worth more than the food.
+func can_hold_festival() -> bool:
+	return festival_cooldown <= 0.0 and resources["food"] > population * 4.0
+
+
+func hold_festival() -> bool:
+	if not can_hold_festival():
+		return false
+	resources["food"] *= (1.0 - Balance.FESTIVAL_FOOD_FRACTION)
+	festival_until = day + Balance.FESTIVAL_DAYS
+	festival_cooldown = Balance.FESTIVAL_COOLDOWN_DAYS
+	# A festival is also where boons get talked about, so it feeds momentum.
+	momentum = mini(momentum + 1, Balance.MOMENTUM_MAX)
+	momentum_until = maxf(momentum_until, day + Balance.MOMENTUM_WINDOW_DAYS)
+	add_log("A festival. The granary takes a beating and everyone remembers it for years.", "era")
+	state_changed.emit()
+	return true
+
+
+func festival_active() -> bool:
+	return day < festival_until
+
+
+# --- Outposts ---------------------------------------------------------------
+
+func outpost_cost() -> Dictionary:
+	var scale := pow(Balance.OUTPOST_COST_GROWTH, float(outposts.size()))
+	var out := {}
+	for res in Balance.OUTPOST_BASE_COST:
+		out[res] = float(Balance.OUTPOST_BASE_COST[res]) * scale
+	return out
+
+
+## Can an outpost go here? Walked ground, far enough out, not already taken.
+func can_found_outpost(tile: int) -> bool:
+	if outposts.size() >= Balance.OUTPOST_MAX or world == null:
+		return false
+	if tile < 0 or tile >= world.explored.size() or world.explored[tile] == 0:
+		return false
+	if not world.workable(tile):
+		return false
+	if Balance.is_water_biome(world.biome[tile]):
+		return false
+	if Vector2(world.tile_pos(tile) - world.origin).length() < Balance.OUTPOST_MIN_DISTANCE:
+		return false
+	for o in outposts:
+		if int(o["tile"]) == tile:
+			return false
+		if Vector2(world.tile_pos(int(o["tile"])) - world.tile_pos(tile)).length() < 5.0:
+			return false
+	var cost := outpost_cost()
+	for res in cost:
+		if resources.get(res, 0.0) < float(cost[res]):
+			return false
+	return true
+
+
+## What this particular ground would be worth to hold. The judgement the elders
+## will not make: it is about a place, not a sum.
+func outpost_value(tile: int) -> Dictionary:
+	if world == null or tile < 0:
+		return {}
+	var r := 3
+	var food := 0.0
+	var wood := 0.0
+	var ore := 0.0
+	var stone := 0.0
+	var p := world.tile_pos(tile)
+	for oy in range(-r, r + 1):
+		for ox in range(-r, r + 1):
+			var x: int = p.x + ox
+			var y: int = p.y + oy
+			if not world.in_bounds(x, y):
+				continue
+			var i := world.idx(x, y)
+			food += world.game_cap[i] * 0.02 + world.forage_cap[i] * 0.03 + world.fertility[i] * 0.6
+			wood += world.forest_cap[i] * 0.03
+			ore += world.ore[i] * 0.9
+			stone += world.stone[i] * 0.5
+	return {"food": food, "wood": wood, "ore": ore, "stone": stone}
+
+
+func found_outpost(tile: int) -> bool:
+	if not can_found_outpost(tile):
+		return false
+	var cost := outpost_cost()
+	for res in cost:
+		resources[res] -= float(cost[res])
+	outposts.append({"tile": tile, "value": outpost_value(tile)})
+	_mods_dirty = true
+	# An outpost is somewhere people are, so it sees its own country.
+	add_log("An outpost is founded %d tiles out. It sends back what the ground there gives."
+			% int(Vector2(world.tile_pos(tile) - world.origin).length()), "era")
+	state_changed.emit()
+	return true
+
+
+## Flat daily production from every outpost, added on top of the home economy.
+func outpost_production(res: String) -> float:
+	var total := 0.0
+	for o in outposts:
+		total += float((o["value"] as Dictionary).get(res, 0.0))
+	return total * _legacy_mult
+
+
+# --- Council ----------------------------------------------------------------
+## A question with no computable right answer, a clock, and a safe default the
+## elders take if nobody says otherwise. Safe is never a disaster and never the
+## best - and that gap is exactly what paying attention is worth.
+
+func _maybe_council(dt: float, offline: bool) -> void:
+	if council_id != "":
+		if day > council_deadline:
+			var safe := _council_safe_option(council_id)
+			_resolve_council(council_id, safe, true, offline)
+		return
+	_council_cooldown -= dt
+	if _council_cooldown > 0.0:
+		return
+	_council_cooldown = Balance.COUNCIL_INTERVAL_DAYS * randf_range(0.7, 1.4)
+	if population < 20.0:
+		return
+	council_id = Balance.COUNCIL_ORDER[randi() % Balance.COUNCIL_ORDER.size()]
+	council_deadline = day + Balance.COUNCIL_PATIENCE_DAYS
+	if not offline:
+		add_log("%s %s" % [Balance.COUNCIL[council_id]["title"],
+				Balance.COUNCIL[council_id]["text"]], "era")
+	council_opened.emit(council_id)
+	state_changed.emit()
+
+
+func _council_safe_option(id: String) -> String:
+	for opt in Balance.COUNCIL[id]["options"]:
+		if bool(opt.get("safe", false)):
+			return String(opt["id"])
+	return String(Balance.COUNCIL[id]["options"][0]["id"])
+
+
+## The player's answer.
+func answer_council(choice: String) -> bool:
+	if council_id == "":
+		return false
+	_resolve_council(council_id, choice, false, false)
+	return true
+
+
+func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool) -> void:
+	council_id = ""
+	council_answered += 1
+	if by_elders:
+		council_by_elders += 1
+
+	match choice:
+		"slaughter":
+			resources["food"] += population * 30.0
+			_scale_stock(world.game, world.game_cap, 0.45)
+			_note("The herds are taken. The granary has never been so full, and the "
+					+ "hunting will be poor for a long time.", offline)
+		"ration":
+			resources["food"] = maxf(resources["food"], population * 6.0)
+			_note("Rations are set. Nobody starves and nobody grows.", offline)
+		"trust":
+			if randf() < 0.55:
+				_note("The winter is mild. Nothing was needed after all.", offline)
+			else:
+				resources["food"] *= 0.55
+				_note("The winter is not mild. The stores take a beating.", offline)
+		"take_in":
+			population += maxf(12.0, population * 0.06)
+			resources["knowledge"] += 60.0 + population * 1.5
+			_note("They stay. Within a month nobody can remember which of them arrived.", offline)
+		"trade":
+			resources["gold"] += 40.0 + population * 0.6
+			resources["knowledge"] += 30.0 + population * 0.8
+			for k in 25:
+				world.reveal_one()
+			_note("They trade well, and draw the country they came through in the dirt.", offline)
+		"refuse":
+			_note("They are given a day's food and pointed at the road.", offline)
+		"deeper":
+			resources["ore"] += maxf(150.0, production["ore"] * 200.0)
+			population = maxf(Balance.MIN_POPULATION, population * 0.97)
+			_note("The seam is everything they hoped. Three of them do not come back up.", offline)
+		"shore_up":
+			resources["stone"] = maxf(0.0, resources["stone"] - population * 2.0)
+			_mine_bonus_days = day + 400.0
+			_note("The shaft is timbered properly. It will still be there in thirty years.", offline)
+		"leave_it":
+			_note("The deep seam is left alone.", offline)
+		"dig":
+			resources["wood"] = maxf(0.0, resources["wood"] - population * 3.0)
+			for i in world.territory:
+				world.fertility[i] = minf(world.fertility[i] * 1.25, 2.2)
+			world.refresh_territory(true)
+			_note("The channel is cut. The fields drink again, and better than before.", offline)
+		"move_fields":
+			resources["food"] *= 0.6
+			for i in world.territory:
+				world.fertility[i] = minf(world.fertility[i] * 1.45, 2.4)
+			world.refresh_territory(true)
+			_note("A season is lost moving everything. The new ground is the best they have had.", offline)
+		"carry":
+			_note("They carry the water, as they always have.", offline)
+		"endow":
+			resources["food"] = maxf(0.0, resources["food"] - population * 8.0)
+			resources["wood"] = maxf(0.0, resources["wood"] - population * 4.0)
+			_endowed = true
+			_mods_dirty = true
+			_note("She gets a building and a stipend, and forty years of pupils.", offline)
+		"allow":
+			resources["knowledge"] += 40.0 + population * 1.0
+			_note("She gets on with it in the afternoons.", offline)
+
+	if by_elders:
+		add_log("(The elders decided this one themselves.)", "info")
+	council_closed.emit(id, choice, by_elders)
+	state_changed.emit()
+
+
+func _note(text: String, offline: bool) -> void:
+	if not offline:
+		add_log(text, "good")
+
+
 # --- Ecology ----------------------------------------------------------------
 
 ## Logistic regrowth toward capacity plus immigration from beyond the territory,
 ## so a hard-worked stock always recovers. Also the one pass that recomputes the
 ## living-stock totals the rest of the step reads.
 func _ecology(dt: float) -> void:
+	var regrow := 1.0
+	if decree != "":
+		regrow = float(Balance.DECREES[decree].get("regrowth", 1.0))
 	var tg := 0.0
 	var tf := 0.0
 	var tw := 0.0
@@ -652,9 +984,9 @@ func _ecology(dt: float) -> void:
 		if world.forest_cap[i] > 0.01:
 			cover = world.forest[i] / world.forest_cap[i]
 		var cap: float = world.game_cap[i] * (1.0 - Balance.HABITAT_WEIGHT + Balance.HABITAT_WEIGHT * cover)
-		tg += _grow(world.game, i, cap, Balance.GAME_REGROWTH, Balance.GAME_IMMIGRATION, dt)
-		tf += _grow(world.forage, i, world.forage_cap[i], Balance.FORAGE_REGROWTH, Balance.FORAGE_IMMIGRATION, dt)
-		tw += _grow(world.forest, i, world.forest_cap[i], Balance.FOREST_REGROWTH, Balance.FOREST_IMMIGRATION, dt)
+		tg += _grow(world.game, i, cap, Balance.GAME_REGROWTH * regrow, Balance.GAME_IMMIGRATION * regrow, dt)
+		tf += _grow(world.forage, i, world.forage_cap[i], Balance.FORAGE_REGROWTH * regrow, Balance.FORAGE_IMMIGRATION * regrow, dt)
+		tw += _grow(world.forest, i, world.forest_cap[i], Balance.FOREST_REGROWTH * regrow, Balance.FOREST_IMMIGRATION * regrow, dt)
 		# One comparison per worked tile: woodland that has been cut flat turns
 		# into a clearing, and turns back once the trees are up again.
 		world.update_cover(i)
@@ -690,6 +1022,16 @@ func _mult(kind: String) -> float:
 	var m := float(_yield_mult.get(kind, 1.0)) * _legacy_mult
 	if day < _omen_until:
 		m *= Balance.OMEN_MULTIPLIER
+	# Momentum: boons caught close together, decaying if you stop watching.
+	if day < momentum_until and momentum > 0:
+		m *= 1.0 + float(momentum) * Balance.MOMENTUM_PER_BOON
+	# A decree is a commitment, so it cuts both ways.
+	if decree != "":
+		var d: Dictionary = Balance.DECREES[decree]
+		m *= float((d["boost"] as Dictionary).get(kind, 1.0))
+		m *= float((d["penalty"] as Dictionary).get(kind, 1.0))
+	if kind == "knowledge" and day < festival_until:
+		m *= Balance.FESTIVAL_KNOWLEDGE_MULT
 	return m
 
 
@@ -782,6 +1124,14 @@ func _produce(dt: float) -> void:
 		resources["ore"] += o_rate * dt
 		resources["gold"] += g_rate * dt
 
+	# Outposts: flat daily production from ground held out past the frontier.
+	if not outposts.is_empty():
+		for res in ["food", "wood", "ore", "stone"]:
+			var op := outpost_production(res)
+			if op > 0.0:
+				production[res] += op
+				resources[res] += op * dt
+
 	# Knowledge: ambient learning plus dedicated elders.
 	var k_rate := Balance.AMBIENT_KNOWLEDGE * sqrt(maxf(population, 1.0))
 	k_rate += float(jobs.get("thinker", 0)) * Balance.KNOWLEDGE_PER_THINKER * _mult("knowledge")
@@ -844,7 +1194,12 @@ func _consume_and_grow(dt: float) -> void:
 	var larder := clampf(resources["food"] / maxf(population * 5.0, 1.0), 0.0, 1.0)
 	var fertility := need_score * (0.35 + 0.65 * larder)
 
-	births_per_day = Balance.BIRTH_RATE_MAX * population * fertility * crowd * _birth_mult
+	var birth_mult := _birth_mult
+	if decree != "":
+		birth_mult *= float(Balance.DECREES[decree].get("birth_mult", 1.0))
+	if day < festival_until:
+		birth_mult *= Balance.FESTIVAL_BIRTH_MULT
+	births_per_day = Balance.BIRTH_RATE_MAX * population * fertility * crowd * birth_mult
 	var crowd_death := 0.0
 	if population > housing and housing > 0.0:
 		crowd_death = 0.012 * (population / housing - 1.0)
@@ -894,7 +1249,13 @@ func _housing_total() -> float:
 			continue
 		var eff: Dictionary = Balance.BUILDINGS[id]["effects"]
 		total += float(eff.get("housing", 0.0)) * count
-	return total
+	# Density. Drains, clean water and mortared walls mean a given building
+	# holds far more people than it used to - which is how population responds
+	# to how well the place is run, rather than only to how much stone it has.
+	var density := _housing_mult
+	if decree != "":
+		density *= float(Balance.DECREES[decree].get("housing_mult", 1.0))
+	return Balance.BASE_HOUSING + (total - Balance.BASE_HOUSING) * density
 
 
 func _check_milestones(offline: bool) -> void:
@@ -1519,9 +1880,17 @@ func _progress_builds(dt: float) -> void:
 	var work: float = float(jobs.get("builder", 0)) * Balance.BUILDER_WORK_PER_DAY * _mult("build") * dt
 	if work <= 0.0:
 		return
-	var order: Dictionary = build_queue[0]
-	order["work"] = float(order["work"]) + work
-	if float(order["work"]) >= float(order["total"]):
+	# Surplus effort rolls on to the next order instead of being thrown away,
+	# so a large workforce finishes several things in a step rather than one.
+	var guard := 0
+	while work > 0.0 and not build_queue.is_empty() and guard < MAX_QUEUED_ORDERS + 2:
+		guard += 1
+		var order: Dictionary = build_queue[0]
+		var needed: float = float(order["total"]) - float(order["work"])
+		if work < needed:
+			order["work"] = float(order["work"]) + work
+			return
+		work -= needed
 		var id: String = order["id"]
 		build_queue.pop_front()
 		buildings[id] = int(buildings.get(id, 0)) + 1
@@ -1535,12 +1904,26 @@ func _progress_builds(dt: float) -> void:
 ## This is not a convenience - it is the game. Nobody is watching an idle game
 ## most of the time, and a civilisation that only grows while somebody is
 ## clicking the Build tab is not a civilisation that grows.
+## Queue as much as the settlement can actually pay for, up to a few orders.
+##
+## This used to place one order a day, which quietly capped how fast anything
+## could be built no matter how rich the place got - a civilisation producing
+## five times as much housed barely more people, because the pipeline, not the
+## purse, was the limit.
+const MAX_QUEUED_ORDERS := 4
+
+
 func _auto_build() -> void:
-	if build_queue.size() >= 2:
-		return
-	for id in _build_priority():
-		if can_build(id):
-			queue_building(id)
+	var guard := 0
+	while build_queue.size() < MAX_QUEUED_ORDERS and guard < MAX_QUEUED_ORDERS * 2:
+		guard += 1
+		var placed := false
+		for id in _build_priority():
+			if can_build(id):
+				queue_building(id)
+				placed = true
+				break
+		if not placed:
 			return
 
 
@@ -1553,14 +1936,20 @@ func _build_priority() -> Array[String]:
 	if expansion_blocked_by_exploration():
 		list.append("scout_camp")
 
-	# Best shelter the age can manage when the place is filling up - but only
-	# while the land can feed the people already in it. Housing that outruns
-	# food parks everyone at subsistence on the never-lose floor, which looks
-	# like growth and is not.
+	# Shelter is built toward what the land can *feed*, not toward how full the
+	# huts are right now. Building only at 75% occupancy meant a surplus of food
+	# never turned into people - it just sat in the granary, and a well-managed
+	# settlement grew no faster than a neglected one. Housing chases the food
+	# supply; the food supply is what the player can actually influence.
 	var shelter: Array[String] = ["stone_house", "longhouse", "hut", "windbreak"]
-	var fed := carrying_capacity >= population * 0.95
-	if population > housing * 0.75 and fed:
-		list.append_array(shelter)
+	var food_supports: float = production["food"] / Balance.FOOD_PER_PERSON_PER_DAY
+	var larder_supports: float = resources["food"] / (Balance.FOOD_PER_PERSON_PER_DAY * 30.0)
+	var room_wanted: float = maxf(food_supports, larder_supports)
+	# Still never past what the land can carry - housing that outruns food parks
+	# everyone at subsistence on the never-lose floor, which looks like growth.
+	if housing < room_wanted or population > housing * 0.75:
+		if carrying_capacity >= population * 0.95 or housing < room_wanted:
+			list.append_array(shelter)
 
 	# Work slots for the trades that need somewhere to stand.
 	if job_unlocked("farmer") and _farm_plots < population * 0.30:
@@ -1804,8 +2193,13 @@ func _rebuild_mods() -> void:
 	_quarry_slots = 0.0
 	_woodlot_slots = 0.0
 	_birth_mult = 1.0
+	_housing_mult = 1.0
 	_territory_bonus = 0.0
 	_legacy_mult = 1.0 + legacy_points * Balance.LEGACY_BONUS_PER_POINT
+	if _endowed:
+		_knowledge_mult *= 1.30
+	if day < _mine_bonus_days:
+		_yield_mult["ore"] = float(_yield_mult.get("ore", 1.0)) * 1.35
 
 	for id in techs:
 		_apply_effects(Balance.TECHS[id]["effects"], 1)
@@ -1855,6 +2249,8 @@ func _apply_effects(eff: Dictionary, count: int) -> void:
 				_woodlot_slots += float(eff[key]) * count
 			"birth_mult":
 				_birth_mult *= pow(float(eff[key]), count)
+			"housing_mult":
+				_housing_mult *= pow(float(eff[key]), count)
 			"territory":
 				_territory_bonus += float(eff[key]) * count
 
@@ -2032,6 +2428,19 @@ func to_dict() -> Dictionary:
 		"boon_expires": boon_expires,
 		"omen_until": _omen_until,
 		"history": _history_to_save(),
+		"decree": decree,
+		"decree_cooldown": decree_cooldown,
+		"council_id": council_id,
+		"council_deadline": council_deadline,
+		"council_answered": council_answered,
+		"council_by_elders": council_by_elders,
+		"momentum": momentum,
+		"momentum_until": momentum_until,
+		"festival_until": festival_until,
+		"festival_cooldown": festival_cooldown,
+		"outposts": outposts.duplicate(true),
+		"mine_bonus_days": _mine_bonus_days,
+		"endowed": _endowed,
 		"era": era,
 		"milestone": _milestone,
 		"resources": resources.duplicate(),
@@ -2068,6 +2477,22 @@ func from_dict(d: Dictionary) -> void:
 	boon_expires = float(d.get("boon_expires", 0.0))
 	_omen_until = float(d.get("omen_until", -1.0))
 	_history_from_save(d.get("history", {}))
+	decree = String(d.get("decree", ""))
+	decree_cooldown = float(d.get("decree_cooldown", 0.0))
+	council_id = String(d.get("council_id", ""))
+	council_deadline = float(d.get("council_deadline", 0.0))
+	council_answered = int(d.get("council_answered", 0))
+	council_by_elders = int(d.get("council_by_elders", 0))
+	momentum = int(d.get("momentum", 0))
+	momentum_until = float(d.get("momentum_until", -1.0))
+	festival_until = float(d.get("festival_until", -1.0))
+	festival_cooldown = float(d.get("festival_cooldown", 0.0))
+	_mine_bonus_days = float(d.get("mine_bonus_days", -1.0))
+	_endowed = bool(d.get("endowed", false))
+	outposts.clear()
+	for o in d.get("outposts", []):
+		if o is Dictionary:
+			outposts.append({"tile": int(o.get("tile", 0)), "value": o.get("value", {})})
 	era = int(d.get("era", 0))
 	_milestone = int(d.get("milestone", 0))
 	auto_assign = bool(d.get("auto_assign", true))

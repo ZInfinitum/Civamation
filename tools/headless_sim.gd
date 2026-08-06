@@ -32,6 +32,7 @@ func _ready() -> void:
 	_test_save_load()
 	_test_legacy()
 	_test_baseline()
+	_test_engagement()
 
 	print("")
 	if _failures.is_empty():
@@ -218,7 +219,7 @@ func _test_legacy() -> void:
 ## A silent balance regression should break the build, not be discovered in
 ## play three weeks later. Wide tolerances - this catches things falling over,
 ## not honest tuning.
-const BASELINE := {"day": 500.0, "pop_min": 300.0, "pop_max": 4000.0,
+const BASELINE := {"day": 500.0, "pop_min": 300.0, "pop_max": 40000.0,
 	"techs_min": 18, "explored_min": 0.25}
 
 
@@ -239,6 +240,123 @@ func _test_baseline() -> void:
 	if Sim.world.explored_fraction() < float(BASELINE["explored_min"]):
 		_failures.append("baseline: only %.0f%% mapped"
 				% (Sim.world.explored_fraction() * 100.0))
+
+
+## The design's central claim, measured rather than asserted: a player who
+## actually manages the settlement should beat one who leaves it running.
+##
+## Same seed, same length, same autopilots. The only difference is that one run
+## uses the levers the elders will not touch - decrees, council answers,
+## festivals, boons, outposts. If the gap is not there, the management layer is
+## decoration and the design has failed.
+const ENGAGEMENT_DAYS := 900.0
+## The margin the managed run has to win by to count as a real difference.
+const ENGAGEMENT_MIN_EDGE := 1.25
+
+
+func _test_engagement() -> void:
+	print("")
+	print("=== managed vs left alone (seed 777, %d days) ===" % int(ENGAGEMENT_DAYS))
+
+	Sim.new_game(777, Balance.WorldType.CONTINENTS)
+	Sim.simulate_days(ENGAGEMENT_DAYS, true)
+	var idle_pop := Sim.population
+	var idle_out := Sim.lifetime_output
+	var idle_legacy := Sim.legacy_on_offer()
+	print("left alone: %s people, %s lifetime output, %s Legacy on offer"
+			% [Balance.fmt_count(idle_pop), Balance.fmt(idle_out), Balance.fmt(idle_legacy)])
+
+	Sim.new_game(777, Balance.WorldType.CONTINENTS)
+	var elapsed := 0.0
+	while elapsed < ENGAGEMENT_DAYS:
+		Sim.simulate_days(8.0, true)
+		elapsed += 8.0
+		_play_actively()
+	var play_pop := Sim.population
+	var play_out := Sim.lifetime_output
+	print("managed:    %s people, %s lifetime output, %s Legacy on offer"
+			% [Balance.fmt_count(play_pop), Balance.fmt(play_out), Balance.fmt(Sim.legacy_on_offer())])
+	print("            %d council questions answered, %d left to the elders, %d outposts"
+			% [Sim.council_answered - Sim.council_by_elders, Sim.council_by_elders,
+			Sim.outposts.size()])
+
+	var pop_edge := play_pop / maxf(idle_pop, 1.0)
+	var out_edge := play_out / maxf(idle_out, 1.0)
+	print("edge: %.2fx population, %.2fx lifetime output" % [pop_edge, out_edge])
+	if out_edge < ENGAGEMENT_MIN_EDGE:
+		_failures.append("engagement: managing gains only %.2fx lifetime output - "
+				% out_edge + "the management layer is not worth using")
+	# The headline number has to move too. A five-fold economy that houses the
+	# same number of people does not *look* like better play, whatever the
+	# spreadsheet says.
+	if pop_edge < 1.15:
+		_failures.append("engagement: managing gains only %.2fx population - the number "
+				% pop_edge + "the player actually watches barely responds")
+
+
+## A reasonably attentive player: catches boons, answers the council, keeps a
+## decree matched to the bottleneck, throws a festival when it can, and plants
+## outposts on good ground.
+func _play_actively() -> void:
+	if Sim.boon_id != "":
+		Sim.collect_boon()
+	if Sim.council_id != "":
+		Sim.answer_council(_best_council_option(Sim.council_id))
+	if Sim.can_hold_festival() and Sim.population > 40.0:
+		Sim.hold_festival()
+	if Sim.can_set_decree():
+		var want := _pick_decree()
+		if want != Sim.decree:
+			Sim.set_decree(want)
+	_maybe_outpost()
+
+
+## Deliberately not optimal - just sensible. A real player would do better.
+func _pick_decree() -> String:
+	if Sim.expansion_blocked_by_exploration():
+		return "expansion"
+	if Sim.researching != "" and Sim.resources["knowledge"] < Sim.research_cost():
+		return "learning"
+	if Sim.mine_slots() < Sim.population * 0.08 or Sim.resources["stone"] < Sim.population * 2.0:
+		return "industry"
+	if Sim.carrying_capacity > Sim.population * 1.2:
+		return "the_hearth"
+	return "the_land"
+
+
+func _best_council_option(id: String) -> String:
+	match id:
+		"hard_winter":
+			return "slaughter" if Sim.food_satisfaction < 0.98 else "trust"
+		"strangers":
+			return "take_in" if Sim.carrying_capacity > Sim.population * 1.1 else "trade"
+		"the_seam":
+			return "shore_up"
+		"the_river":
+			return "dig"
+		"the_teacher":
+			return "endow" if Sim.resources["food"] > Sim.population * 20.0 else "allow"
+	return ""
+
+
+func _maybe_outpost() -> void:
+	if Sim.outposts.size() >= 3 or Sim.world == null:
+		return
+	var best := -1
+	var best_score := 0.0
+	# Sample rather than sweep - a player eyeballs the map, they do not solve it.
+	for probe in 220:
+		var i := randi() % Sim.world.explored.size()
+		if not Sim.can_found_outpost(i):
+			continue
+		var v := Sim.outpost_value(i)
+		var score := float(v.get("food", 0.0)) + float(v.get("ore", 0.0)) * 2.0 \
+				+ float(v.get("wood", 0.0)) + float(v.get("stone", 0.0))
+		if score > best_score:
+			best_score = score
+			best = i
+	if best >= 0:
+		Sim.found_outpost(best)
 
 
 func _report() -> void:

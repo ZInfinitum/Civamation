@@ -14,8 +14,11 @@ extends Control
 ##   fixed budget of primitives regardless of how big the civilisation gets.
 ## * `_draw` never runs on a timer. It runs when the world changed.
 ##
-## Everything is primitives, so the project has no art dependencies and runs
-## the moment it is cloned.
+## Everything is drawn with primitives *by default*, so the project has no art
+## dependencies and runs the moment it is cloned. Every one of those shapes is
+## also a fallback: if `Art` has a texture for a biome, building, animal or
+## worker, that is drawn instead, with no other change anywhere. See
+## `assets/README.md`.
 
 const FOG := Color("0a0d11")
 const FOG_EDGE := Color("161c23")
@@ -25,6 +28,10 @@ const DEPLETED := Color("6b5a3c")
 ## Pixels per tile. Below this, overlays are unreadable and are skipped.
 const DETAIL_ZOOM := 9.0
 const ANIMAL_ZOOM := 7.0
+## Terrain sprites are one draw call per visible tile, so they only appear once
+## tiles are big enough to be worth it - which also bounds how many there are.
+const TERRAIN_SPRITE_ZOOM := 8.0
+const MAX_TERRAIN_SPRITES := 1400
 const MIN_ZOOM := 3.0
 const MAX_ZOOM := 26.0
 ## Hard ceiling on overlay primitives per frame, whatever the population.
@@ -42,6 +49,8 @@ var _dirty := true
 var _rebuild_accum := 0.0
 var _place_accum := 0.0
 var _dragging := false
+## Set by the Rule tab: the next map click founds an outpost.
+var placing_outpost := false
 
 ## Where each job's markers get drawn. Recomputed on a slow timer because it
 ## sorts, and sorting every frame for cosmetics would be absurd.
@@ -60,6 +69,9 @@ func _ready() -> void:
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_make_scatter()
 	Sim.game_reset.connect(_on_reset)
+	Art.reloaded.connect(func() -> void:
+		_terrain_dirty = true
+		_dirty = true)
 	Sim.state_changed.connect(func() -> void: _dirty = true)
 	resized.connect(func() -> void: _dirty = true)
 	_on_reset()
@@ -131,6 +143,13 @@ func _gui_input(event: InputEvent) -> void:
 			# stands rather than only on the button in the top bar.
 			if mb.pressed and _boon_hit(mb.position):
 				Sim.collect_boon()
+				accept_event()
+				return
+			if mb.pressed and placing_outpost:
+				var t := _screen_to_tile(mb.position).floor()
+				if Sim.world.in_bounds(int(t.x), int(t.y)):
+					if Sim.found_outpost(Sim.world.idx(int(t.x), int(t.y))):
+						placing_outpost = false
 				accept_event()
 				return
 			_dragging = mb.pressed
@@ -274,6 +293,12 @@ func _draw() -> void:
 	var x1 := mini(world.w - 1, int(hi.x))
 	var y1 := mini(world.h - 1, int(hi.y))
 
+	# Terrain sprites, if any have been dropped in. The colour texture underneath
+	# stays - it carries the fog states - and these go on top, only for tiles
+	# actually on screen and only when they would be big enough to see.
+	if zoom >= TERRAIN_SPRITE_ZOOM and Art.has_any("terrain"):
+		_draw_terrain_sprites(world, x0, y0, x1, y1)
+
 	if zoom >= ANIMAL_ZOOM:
 		_draw_wildlife(world, x0, y0, x1, y1)
 	if zoom >= DETAIL_ZOOM:
@@ -287,6 +312,9 @@ func _draw() -> void:
 	_draw_settlement(home)
 	if zoom >= DETAIL_ZOOM:
 		_draw_workers(world)
+	_draw_outposts(world)
+	if placing_outpost:
+		_draw_placement(world)
 	_draw_boon(world)
 	_draw_legend()
 
@@ -402,7 +430,11 @@ func _draw_workers(world: CivWorld) -> void:
 			var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5) + jitter)
 			if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
 				continue
-			_draw_worker(p, zoom * 0.40, String(job["glyph"]), job["color"])
+			var tex := Art.worker(job_id)
+			if tex != null:
+				Art.draw_centred(self, tex, p, zoom * 0.9)
+			else:
+				_draw_worker(p, zoom * 0.40, String(job["glyph"]), job["color"])
 			budget -= 1
 
 
@@ -563,6 +595,69 @@ func _draw_group(center: Vector2, s: float, id: String, slot: int, color: Color,
 	return slot
 
 
+# --- Outposts ---------------------------------------------------------------
+
+func _draw_outposts(world: CivWorld) -> void:
+	for o in Sim.outposts:
+		var t := world.tile_pos(int(o["tile"]))
+		var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+		if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
+			continue
+		var s := maxf(zoom, 6.0)
+		var tex := Art.ui("outpost")
+		if tex != null:
+			Art.draw_centred(self, tex, p, s)
+			draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
+			continue
+		draw_rect(Rect2(p - Vector2(s * 0.3, s * 0.22), Vector2(s * 0.6, s * 0.44)),
+				Color("c9b06a"), true)
+		draw_colored_polygon(PackedVector2Array([
+			p + Vector2(-s * 0.36, -s * 0.2), p + Vector2(s * 0.36, -s * 0.2),
+			p + Vector2(0, -s * 0.55),
+		]), Color("8a7448"))
+		draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
+
+
+## While placing, shade every tile that would actually take an outpost. The
+## decision is about *where*, so the map has to say where is allowed.
+func _draw_placement(world: CivWorld) -> void:
+	var lo := _screen_to_tile(Vector2.ZERO).floor()
+	var hi := _screen_to_tile(size).ceil()
+	var shown := 0
+	for y in range(maxi(0, int(lo.y)), mini(world.h, int(hi.y) + 1)):
+		for x in range(maxi(0, int(lo.x)), mini(world.w, int(hi.x) + 1)):
+			if shown > 900:
+				return
+			var i := world.idx(x, y)
+			if world.explored[i] == 0 or not Sim.can_found_outpost(i):
+				continue
+			shown += 1
+			draw_rect(Rect2(_tile_to_screen(Vector2(x, y)), Vector2(zoom, zoom)),
+					Color(0.85, 0.75, 0.4, 0.22), true)
+
+
+# --- Terrain sprites --------------------------------------------------------
+
+func _draw_terrain_sprites(world: CivWorld, x0: int, y0: int, x1: int, y1: int) -> void:
+	var drawn := 0
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			if drawn >= MAX_TERRAIN_SPRITES:
+				return
+			var i := world.idx(x, y)
+			if world.explored[i] == 0:
+				continue
+			var tex := Art.terrain(world.biome[i])
+			if tex == null:
+				continue
+			# Unwatched ground is dimmed the same way the colour layer is, so the
+			# fog reads identically whether or not there is artwork.
+			var tint := Color.WHITE if world.observed[i] != 0 else Color(0.5, 0.55, 0.6, 0.85)
+			draw_texture_rect(tex, Rect2(_tile_to_screen(Vector2(x, y)),
+					Vector2(zoom, zoom) + Vector2.ONE), false, tint)
+			drawn += 1
+
+
 # --- Boon -------------------------------------------------------------------
 
 ## The rare, brief, visible thing. Drawn as a ring that reads as "come here"
@@ -578,6 +673,11 @@ func _draw_boon(world: CivWorld) -> void:
 	var col: Color = Balance.BOONS[Sim.boon_id]["color"]
 	var left := clampf((Sim.boon_expires - Sim.day) / Balance.BOON_LIFETIME_DAYS, 0.0, 1.0)
 	var r := maxf(12.0, zoom * 0.75)
+	var tex := Art.ui("boon_" + Sim.boon_id)
+	if tex != null:
+		Art.draw_centred(self, tex, centre, r * 1.6)
+		draw_arc(centre, r, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
+		return
 	draw_arc(centre, r, 0.0, TAU, 28, Color(col.r, col.g, col.b, 0.35), 3.0, true)
 	# The inner arc empties as the moment passes.
 	draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
@@ -603,7 +703,11 @@ func _draw_legend() -> void:
 		if n <= 0:
 			continue
 		var job: Dictionary = Balance.JOBS[job_id]
-		_draw_worker(Vector2(x + 7.0, y - 9.0), 15.0, String(job["glyph"]), job["color"])
+		var ltex := Art.worker(job_id)
+		if ltex != null:
+			Art.draw_centred(self, ltex, Vector2(x + 7.0, y - 9.0), 16.0)
+		else:
+			_draw_worker(Vector2(x + 7.0, y - 9.0), 15.0, String(job["glyph"]), job["color"])
 		var label := "%s %d" % [job["name"], n]
 		draw_string(font, Vector2(x + 17.0, y - 3.0), label,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, job["color"])

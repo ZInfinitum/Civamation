@@ -17,6 +17,7 @@ boot_splash/bg_color=Color(0.09, 0.1, 0.11, 1)
 
 Balance="*res://scripts/autoload/Balance.gd"
 Settings="*res://scripts/autoload/Settings.gd"
+Art="*res://scripts/autoload/Art.gd"
 Sim="*res://scripts/autoload/Sim.gd"
 SaveSystem="*res://scripts/autoload/SaveSystem.gd"
 

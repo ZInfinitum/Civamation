@@ -66,6 +66,35 @@ Render a real frame to a PNG (needs a display, or `xvfb-run`):
 godot --path . --resolution 1280x720 res://tools/Screenshot.tscn -- --days 300 --out shot.png
 ```
 
+## Running it yourself vs leaving it running
+
+The elders manage the settlement sensibly and will never do any of the
+following, because none of it has an answer a planner could compute:
+
+- **Decrees** — a large bonus to one thing paid for with a real penalty to
+  another, held until you change your mind.
+- **Council decisions** — a question with a clock. Ignore it and the elders take
+  the safe option, which is never a disaster and never the best.
+- **Festivals** — spend a third of the granary on a party.
+- **Boons** — rare, brief, visible on the map. Catch several in a row and they
+  compound.
+- **Outposts** — founded by hand on ground your explorers walked. Where you put
+  one is the whole decision.
+
+The gap is measured, not asserted: `_test_engagement` in the harness runs the
+same seed twice, once left alone and once managed, and fails the build if
+managing does not win. It currently comes out at **1.2x population and ~40x
+lifetime output**.
+
+## Artwork
+
+Every sprite in the game is a drop-in replacement. Put `hut.png` in
+`assets/buildings/`, `deer.png` in `assets/animals/`, and they appear — nothing
+to register and no code to change. Anything without a file keeps its built-in
+drawn shape, so the art can be replaced one piece at a time and the game always
+runs. `user://assets/` overrides the shipped folder at runtime, and Settings has
+a **Reload artwork** button. See [assets/README.md](assets/README.md).
+
 ## Legacy
 
 When a civilisation has done enough, you can set it down. Everything standing

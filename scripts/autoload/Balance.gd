@@ -17,7 +17,7 @@ extends Node
 ##    is the Cookie Clicker engine: there is always a next purchase, the numbers
 ##    never stop climbing, and nothing ever hard-caps.
 
-const SAVE_VERSION := 4
+const SAVE_VERSION := 5
 
 # --- Time -------------------------------------------------------------------
 ## Real seconds per in-game day at 1x speed.
@@ -267,6 +267,26 @@ const JOB_ORDER: Array[String] = [
 ##   quarry_slots- quarrier work slots
 ##   woodlot_slots- forester work slots
 const DEFAULT_COST_GROWTH := 1.15
+## Shelter costs the same every time, and this is a design decision rather than
+## a missing number.
+##
+## With any geometric growth at all, the count you can afford rises with the
+## *logarithm* of your income - that is arithmetic, not tuning. A settlement
+## producing nine times as much housed eleven per cent more people, so no amount
+## of good management moved the number the player actually watches. Flat shelter
+## costs hand the limit back to food, which is what the ecology model was always
+## supposed to decide: population settles at what the land can feed, and what
+## the land can feed is precisely what a player can influence.
+##
+## Flat is a step too far: with no cost pressure at all, population feeds food
+## feeds population and the whole economy runs away - a test run reached two
+## hundred thousand people by day 900 and lifetime output in the 1e27s. A small
+## growth keeps the population genuinely responsive to how well the place is run
+## while still damping the loop.
+##
+## The idler curve proper lives on production, multipliers and upgrades, where a
+## steep geometric cost belongs.
+const HOUSING_COST_GROWTH := 1.04
 
 const BUILDINGS := {
 	"firepit": {
@@ -279,7 +299,7 @@ const BUILDINGS := {
 		"name": "Windbreak",
 		"desc": "Hide and brush lean-tos. Barely shelter, but it is a start.",
 		"cost": {"wood": 10.0, "hides": 4.0}, "work": 4.0, "requires": "",
-		"growth": 1.13,
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 3.0}
 	},
 	"drying_rack": {
@@ -293,6 +313,7 @@ const BUILDINGS := {
 		"name": "Hut",
 		"desc": "A round timber hut. The moment the tribe stops moving.",
 		"cost": {"wood": 34.0, "hides": 8.0}, "work": 12.0, "requires": "settlement",
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 6.0}
 	},
 	"woodshed": {
@@ -331,6 +352,7 @@ const BUILDINGS := {
 		"name": "Longhouse",
 		"desc": "Many families under one roof, and somewhere to store the harvest.",
 		"cost": {"wood": 90.0, "stone": 30.0}, "work": 30.0, "requires": "masonry",
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 18.0}
 	},
 	"granary": {
@@ -365,6 +387,7 @@ const BUILDINGS := {
 		"desc": "Mortared walls and a tiled roof. These outlive the people who build them.",
 		"cost": {"stone": 120.0, "wood": 60.0, "ore": 30.0}, "work": 40.0,
 		"requires": "iron_working",
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 30.0}
 	},
 	"shrine": {
@@ -386,6 +409,7 @@ const BUILDINGS := {
 		"desc": "Four storeys of small rooms and a shared yard. Not beautiful. Houses a great many people.",
 		"cost": {"stone": 900.0, "wood": 400.0, "ore": 600.0}, "work": 120.0,
 		"requires": "sanitation",
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 260.0}
 	},
 	"workshop_row": {
@@ -407,6 +431,7 @@ const BUILDINGS := {
 		"desc": "The building that says this place intends to still be here in a hundred years.",
 		"cost": {"stone": 400.0, "wood": 250.0, "ore": 180.0, "gold": 90.0}, "work": 90.0,
 		"requires": "steelmaking",
+		"growth": HOUSING_COST_GROWTH,
 		"effects": {"housing": 70.0, "knowledge_mult": 1.10}
 	}
 }
@@ -583,12 +608,12 @@ const TECHS := {
 	"roads": {
 		"name": "Roads", "cost": 21000.0, "requires": ["steelmaking"], "era": 5,
 		"desc": "Metalled and drained, and they do not wash out in spring. Everything moves further.",
-		"effects": {"territory": 4.0, "yield_mult": {"explore": 1.5, "stone": 1.2}}
+		"effects": {"territory": 4.0, "yield_mult": {"explore": 1.5, "stone": 1.2, "housing_mult": 1.2}}
 	},
 	"aqueducts": {
 		"name": "Aqueducts", "cost": 28000.0, "requires": ["roads", "mathematics"], "era": 5,
 		"desc": "Water arrives whether or not anyone carries it.",
-		"effects": {"yield_mult": {"water": 3.0, "farm": 1.3}}
+		"effects": {"yield_mult": {"water": 3.0, "farm": 1.3, "housing_mult": 1.35}}
 	},
 	"astronomy": {
 		"name": "Astronomy", "cost": 38000.0, "requires": ["mathematics"], "era": 5,
@@ -613,12 +638,12 @@ const TECHS := {
 	"printing": {
 		"name": "Printing", "cost": 150000.0, "requires": ["crop_science", "mathematics"], "era": 6,
 		"desc": "A thought, copied a thousand times, cheaply. Nothing is ever forgotten again.",
-		"effects": {"knowledge_mult": 2.2}
+		"effects": {"knowledge_mult": 2.2, "housing_mult": 1.25}
 	},
 	"sanitation": {
 		"name": "Sanitation", "cost": 230000.0, "requires": ["printing", "aqueducts"], "era": 7,
 		"desc": "Drains, clean water, and the plain observation that the two should not mix.",
-		"effects": {"birth_mult": 1.35, "yield_mult": {"water": 1.5}}
+		"effects": {"birth_mult": 1.35, "yield_mult": {"water": 1.5, "housing_mult": 1.8}}
 	},
 	"mechanisation": {
 		"name": "Mechanisation", "cost": 360000.0, "requires": ["blast_furnace", "printing"], "era": 7,
@@ -633,7 +658,7 @@ const TECHS := {
 	"public_health": {
 		"name": "Public Health", "cost": 950000.0, "requires": ["sanitation", "the_steam_engine"], "era": 7,
 		"desc": "The unglamorous work that lets a city hold a hundred thousand people.",
-		"effects": {"birth_mult": 1.4, "knowledge_mult": 1.3}
+		"effects": {"birth_mult": 1.4, "knowledge_mult": 1.3, "housing_mult": 2.0}
 	},
 	"steelmaking": {
 		"name": "Steelmaking", "cost": 1100.0, "requires": ["iron_working", "coinage"], "era": 4,
@@ -687,13 +712,16 @@ const MILESTONES := [
 ## is earned from everything you ever produced, so a long patient run and a
 ## short explosive one both count.
 ##
-## The exponent matters more than the divisor. At 0.55, doubling a run's output
+## The exponent matters more than the divisor, and it has to survive an economy
+## that reaches 1e18 - at 0.55 that produced millions of points and +590,000,000%.
+## A cube-root curve keeps a good run clearly better without ending the game.
+## At 0.33, doubling a run's output
 ## gives about 1.46x the Legacy - enough that a better run is clearly better,
 ## far from enough that one enormous run ends the game. The divisor is then set
 ## so a first ascension around day 700 is worth roughly +75% rather than the
 ## +900% an earlier pass produced, which made the second run a formality.
-const LEGACY_DIVISOR := 1500000.0
-const LEGACY_EXPONENT := 0.55
+const LEGACY_DIVISOR := 5000000000000.0
+const LEGACY_EXPONENT := 0.33
 ## Each point is a flat percentage on every trade, for ever.
 const LEGACY_BONUS_PER_POINT := 0.03
 ## Below this there is nothing worth carrying and the option stays hidden.
@@ -728,9 +756,25 @@ const BOONS := {
 		"text": "Someone who has seen other places, and will talk about them for a night.",
 		"color": Color("b08ad4"),
 	},
+	"master_mason": {
+		"name": "A Master Mason",
+		"text": "Passing through, and willing to show anyone who turns up how it is properly done.",
+		"color": Color("b9bec4"),
+	},
+	"seam_strike": {
+		"name": "A Struck Seam",
+		"text": "A shaft breaks into something far richer than anyone expected.",
+		"color": Color("c9803f"),
+	},
+	"fair_season": {
+		"name": "A Fair Season",
+		"text": "Rain when it was wanted and sun when it was wanted. It happens perhaps twice in a life.",
+		"color": Color("d4c14e"),
+	},
 }
 
-const BOON_ORDER: Array[String] = ["caravan", "good_omen", "migrating_herd", "wandering_scholar"]
+const BOON_ORDER: Array[String] = ["caravan", "good_omen", "migrating_herd",
+	"wandering_scholar", "master_mason", "seam_strike", "fair_season"]
 ## How long a "good omen" doubles everything, in days.
 const OMEN_DAYS := 30.0
 const OMEN_MULTIPLIER := 2.0
@@ -749,6 +793,171 @@ const DISASTER_FREQUENCY := [
 ## curve is cheap: a few hundred floats is nothing next to the tile arrays.
 const HISTORY_SAMPLES := 360
 const HISTORY_SERIES: Array[String] = ["pop", "food", "herd", "output"]
+
+# --- Decrees ----------------------------------------------------------------
+## The answer to "why would anyone manage this themselves?"
+##
+## Every other decision in the game is locally optimisable - "how many
+## woodcutters" has one right answer and the planner computes it perfectly. A
+## decree is not that. It is a *commitment*: a large bonus to one thing paid for
+## with a real penalty to another, held until you change your mind, with a
+## cooldown so switching is not free.
+##
+## The elders never issue one. They will not gamble the settlement on a guess
+## about what it needs next month, which is exactly the judgement a player has
+## and an optimiser does not. A managed civilisation runs a decree that matches
+## its bottleneck; an unmanaged one runs none.
+const DECREE_SWITCH_COOLDOWN_DAYS := 60.0
+
+const DECREES := {
+	"expansion": {
+		"name": "Go and See",
+		"desc": "Everything that can be spared goes to the frontier. The fields suffer for it.",
+		"boost": {"explore": 3.0, "stone": 1.25},
+		"penalty": {"farm": 0.82, "timber": 0.9},
+		"territory": 2.0,
+		"color": Color("e0d05a"),
+	},
+	"industry": {
+		"name": "Dig and Build",
+		"desc": "Stone, metal and timber before anything else. There will be less on the table.",
+		"boost": {"ore": 1.9, "stone": 1.8, "build": 1.5},
+		"penalty": {"game": 0.85, "forage": 0.85},
+		"color": Color("c9803f"),
+	},
+	"learning": {
+		"name": "Sit and Think",
+		"desc": "The best of them are taken off the work rota and told to work it out instead.",
+		"boost": {"knowledge": 2.6},
+		"penalty": {"build": 0.75, "ore": 0.85},
+		"color": Color("b08ad4"),
+	},
+	"the_land": {
+		"name": "Let It Rest",
+		"desc": "Hunt lightly, cut sparingly. The country comes back, and comes back richer.",
+		"boost": {"farm": 1.35, "forage": 1.3},
+		"penalty": {"ore": 0.7, "stone": 0.7},
+		"regrowth": 2.0,
+		"color": Color("7fbf6a"),
+	},
+	"the_hearth": {
+		"name": "Mind the Children",
+		"desc": "Fewer hands in the field, more mouths next year. A bet on the far side of a decade.",
+		"boost": {},
+		"penalty": {"game": 0.9, "forage": 0.9, "ore": 0.9, "stone": 0.9, "timber": 0.9},
+		"birth_mult": 1.9,
+		"housing_mult": 1.3,
+		"color": Color("d98555"),
+	},
+}
+
+const DECREE_ORDER: Array[String] = ["expansion", "industry", "learning", "the_land", "the_hearth"]
+
+# --- Council decisions ------------------------------------------------------
+## Something happens, the elders want an answer, and there is a right answer
+## only if you know what the settlement needs right now.
+##
+## Every one has a `safe` option, which is what the elders choose on their own
+## if nobody says otherwise. Safe is deliberately the weakest - never a
+## disaster, never the best. That gap *is* the value of paying attention, and it
+## is measurable: see the managed-vs-autopilot test in the harness.
+const COUNCIL_INTERVAL_DAYS := 150.0
+## How long a question stays open before the elders answer it themselves.
+const COUNCIL_PATIENCE_DAYS := 25.0
+
+const COUNCIL := {
+	"hard_winter": {
+		"title": "A Hard Winter Is Coming",
+		"text": "The birds went south early and the elders have seen this before.",
+		"options": [
+			{"id": "slaughter", "label": "Take the herds now",
+				"detail": "A great deal of food at once, and thin hunting for a year."},
+			{"id": "ration", "label": "Ration what there is", "safe": true,
+				"detail": "Nobody starves. Nobody grows either."},
+			{"id": "trust", "label": "Trust the hunt",
+				"detail": "Nothing changes. If the winter is mild you lose nothing at all."},
+		],
+	},
+	"strangers": {
+		"title": "Strangers at the Edge of the Fields",
+		"text": "Two dozen of them, thin, with tools you do not recognise.",
+		"options": [
+			{"id": "take_in", "label": "Take them in",
+				"detail": "More hands, more mouths, and whatever they know."},
+			{"id": "trade", "label": "Trade and send them on",
+				"detail": "Gold and news of the country beyond."},
+			{"id": "refuse", "label": "Send them on", "safe": true,
+				"detail": "No risk, and no gain."},
+		],
+	},
+	"the_seam": {
+		"title": "An Argument About the Seam",
+		"text": "The miners want to drive deeper. The elders think the props will not hold.",
+		"options": [
+			{"id": "deeper", "label": "Drive deeper",
+				"detail": "A great deal of ore. Some of it will cost people."},
+			{"id": "shore_up", "label": "Shore it up first",
+				"detail": "Slower now, and the shaft lasts."},
+			{"id": "leave_it", "label": "Leave it be", "safe": true,
+				"detail": "Work the ground you already have."},
+		],
+	},
+	"the_river": {
+		"title": "The River Has Moved",
+		"text": "A spring flood cut a new channel and the old fields are half a mile from water.",
+		"options": [
+			{"id": "dig", "label": "Dig a channel to the fields",
+				"detail": "Hard work, and the fields are better than they ever were."},
+			{"id": "move_fields", "label": "Move the fields to the river",
+				"detail": "Lose a season, gain the best ground you have had."},
+			{"id": "carry", "label": "Carry the water", "safe": true,
+				"detail": "It is what everyone has always done."},
+		],
+	},
+	"the_teacher": {
+		"title": "Someone Who Wants to Teach",
+		"text": "One of the elders has started gathering the children in the afternoons.",
+		"options": [
+			{"id": "endow", "label": "Give her a building and a stipend",
+				"detail": "Costs real food and timber now. Compounds for ever."},
+			{"id": "allow", "label": "Let her get on with it", "safe": true,
+				"detail": "Costs nothing, and does a little."},
+		],
+	},
+}
+
+const COUNCIL_ORDER: Array[String] = ["hard_winter", "strangers", "the_seam", "the_river", "the_teacher"]
+
+# --- Momentum ---------------------------------------------------------------
+## Boons collected close together build on each other. This is the direct
+## reward for actually watching: a player who catches three in a row is running
+## at nearly double for a while, and one who never looks loses nothing they had.
+const MOMENTUM_WINDOW_DAYS := 45.0
+const MOMENTUM_PER_BOON := 0.30
+const MOMENTUM_MAX := 5
+const MOMENTUM_DECAY_DAYS := 60.0
+
+# --- Festivals --------------------------------------------------------------
+## A manual action with a real cost. The elders never call one - spending a
+## third of the granary on a party is not a decision an optimiser makes, and it
+## is exactly the sort of thing a civilisation does.
+const FESTIVAL_COOLDOWN_DAYS := 120.0
+const FESTIVAL_FOOD_FRACTION := 0.35
+const FESTIVAL_DAYS := 40.0
+const FESTIVAL_BIRTH_MULT := 2.2
+const FESTIVAL_KNOWLEDGE_MULT := 1.6
+
+# --- Outposts ---------------------------------------------------------------
+## Founded by hand on ground the explorers have walked. The elders will not
+## choose where - it is a judgement about a place, not a sum - so this is the
+## one piece of the map the player alone decides.
+const OUTPOST_BASE_COST := {"wood": 220.0, "stone": 140.0, "food": 300.0}
+const OUTPOST_COST_GROWTH := 1.55
+## Minimum distance from home, in tiles: an outpost has to actually be somewhere.
+const OUTPOST_MIN_DISTANCE := 8.0
+## Each outpost adds this much worked land, and its tile's richness on top.
+const OUTPOST_TERRITORY := 1.2
+const OUTPOST_MAX := 12
 
 # --- World ------------------------------------------------------------------
 ## Big enough that walking to the edge is a project, which is the point of
@@ -940,6 +1149,23 @@ const EVENT_COOLDOWN_DAYS := 24.0
 const EVENT_CHANCE_PER_DAY := 0.06
 
 
+## Stable lowercase id for a biome, which is also its artwork filename.
+static func biome_id(b: int) -> String:
+	if not BIOME_INFO.has(b):
+		return "unknown"
+	return String(BIOME_INFO[b]["name"]).to_lower().replace(" ", "_")
+
+
+## Same for an animal.
+static func animal_id(kind: int) -> String:
+	match kind:
+		Animal.DEER: return "deer"
+		Animal.WOLF: return "wolf"
+		Animal.RABBIT: return "rabbit"
+		Animal.BIRD: return "bird"
+	return "unknown"
+
+
 static func is_water_biome(b: int) -> bool:
 	return b == Biome.OCEAN or b == Biome.LAKE or b == Biome.RIVER
 
@@ -961,8 +1187,10 @@ static func world_type_info(id: int) -> Dictionary:
 static func fmt(value: float, decimals: int = 1) -> String:
 	var a := absf(value)
 	if a >= 1e18:
-		# Past quintillions the suffixes stop being worth learning.
-		return "%.2e" % value
+		# Past quintillions the suffixes stop being worth learning. GDScript's
+		# String % has no %e, so this is assembled rather than formatted.
+		var e := int(floor(log(a) / log(10.0)))
+		return "%.2fe%d" % [value / pow(10.0, float(e)), e]
 	if a >= 1e15:
 		return "%.2fQ" % (value / 1e15)
 	if a >= 1e12:

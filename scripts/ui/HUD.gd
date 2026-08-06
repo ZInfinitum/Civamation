@@ -56,6 +56,12 @@ var _boon_button: Button
 var _legacy_button: Button
 var _surge_button: Button
 var _sparks := {}
+var _decree_list: VBoxContainer
+var _festival_button: Button
+var _outpost_button: Button
+var _rule_note: Label
+var _council_dialog: AcceptDialog
+var _placing_outpost := false
 
 
 func _ready() -> void:
@@ -310,6 +316,14 @@ func _build_left_column() -> Control:
 	res.add_child(_heading("STORES"))
 	for id in Balance.RESOURCE_ORDER:
 		var row := HBoxContainer.new()
+		# Icon if one has been dropped in; the coloured name carries it if not.
+		var icon := TextureRect.new()
+		icon.custom_minimum_size = Vector2(18, 18)
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.texture = Art.resource_icon(id)
+		icon.visible = icon.texture != null
+		row.add_child(icon)
 		var name_label := _text(Balance.RESOURCES[id]["name"], 14, Balance.RESOURCES[id]["color"])
 		name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(name_label)
@@ -322,7 +336,7 @@ func _build_left_column() -> Control:
 		rate.custom_minimum_size.x = 58
 		row.add_child(rate)
 		res.add_child(row)
-		_resource_rows[id] = {"name": name_label, "amount": amount, "rate": rate}
+		_resource_rows[id] = {"name": name_label, "amount": amount, "rate": rate, "icon": icon}
 	col.add_child(_panel_of(res))
 
 	var hist := _panel()
@@ -473,6 +487,42 @@ func _build_right_column() -> Control:
 	up.add_child(_upgrade_list)
 	tabs.add_child(_panel_of(up))
 
+	var rule := _tab_scroll("Rule")
+	rule.add_child(_wrapped("The elders run the settlement sensibly and will never do any "
+			+ "of this. A decree is a commitment with a real cost; a festival spends the "
+			+ "granary on a party; an outpost is a judgement about a place. None of them "
+			+ "has a right answer a planner could compute, which is why they are yours.",
+			12, TEXT))
+
+	rule.add_child(_heading("DECREE"))
+	_rule_note = _text("", 11, MUTED)
+	_rule_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	rule.add_child(_rule_note)
+	_decree_list = VBoxContainer.new()
+	_decree_list.add_theme_constant_override("separation", 6)
+	rule.add_child(_decree_list)
+	_build_decree_cards()
+
+	rule.add_child(_heading("THE SETTLEMENT"))
+	_festival_button = Button.new()
+	_festival_button.pressed.connect(func() -> void:
+		Sim.hold_festival()
+		_dirty = true)
+	rule.add_child(_festival_button)
+	rule.add_child(_wrapped("Spends a third of the food. Births and ideas surge for a season, "
+			+ "and it counts toward your momentum."))
+
+	_outpost_button = Button.new()
+	_outpost_button.pressed.connect(func() -> void:
+		_placing_outpost = not _placing_outpost
+		_map.placing_outpost = _placing_outpost
+		_dirty = true)
+	rule.add_child(_outpost_button)
+	rule.add_child(_wrapped(("Founded by hand on ground your explorers have walked, at least "
+			+ "%d tiles out. It sends back whatever that country gives - so where you put "
+			+ "it is the whole decision.") % int(Balance.OUTPOST_MIN_DISTANCE)))
+	tabs.add_child(_panel_of(rule))
+
 	var tech := _tab_scroll("Knowledge")
 	tech.add_child(_toggle("Pursue whatever is cheapest", Sim.auto_research, "",
 			func(on: bool) -> void:
@@ -500,6 +550,118 @@ func _build_log_panel() -> Control:
 	_log_text.custom_minimum_size.y = 92
 	v.add_child(_log_text)
 	return _panel_of(v)
+
+
+func _build_decree_cards() -> void:
+	for c in _decree_list.get_children():
+		c.queue_free()
+	var none := Button.new()
+	none.text = "No decree (let them get on with it)"
+	none.pressed.connect(func() -> void:
+		Sim.set_decree("")
+		_dirty = true)
+	_decree_list.add_child(none)
+
+	for id in Balance.DECREE_ORDER:
+		var d: Dictionary = Balance.DECREES[id]
+		var v := _card()
+		var head := HBoxContainer.new()
+		var name_label := _text(d["name"], 14, d["color"])
+		name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head.add_child(name_label)
+		v.add_child(head)
+		v.add_child(_wrapped(d["desc"]))
+		v.add_child(_text(_decree_effect_text(d), 11, GOOD))
+		var btn := Button.new()
+		btn.text = "Issue this decree"
+		btn.pressed.connect(func() -> void:
+			Sim.set_decree(id)
+			_dirty = true)
+		v.add_child(btn)
+		var box := _panel_of(v)
+		box.set_meta("id", id)
+		box.set_meta("btn", btn)
+		box.set_meta("name", name_label)
+		_decree_list.add_child(box)
+
+
+func _decree_effect_text(d: Dictionary) -> String:
+	var parts: Array[String] = []
+	for kind in d.get("boost", {}):
+		parts.append("+%d%% %s" % [int(round((float(d["boost"][kind]) - 1.0) * 100.0)),
+				_kind_name(kind)])
+	if d.has("birth_mult"):
+		parts.append("+%d%% births" % int(round((float(d["birth_mult"]) - 1.0) * 100.0)))
+	if d.has("housing_mult"):
+		parts.append("+%d%% room" % int(round((float(d["housing_mult"]) - 1.0) * 100.0)))
+	if d.has("regrowth"):
+		parts.append("the land recovers %sx faster" % String.num(float(d["regrowth"]), 1))
+	if d.has("territory"):
+		parts.append("+%s tiles range" % String.num(float(d["territory"]), 1))
+	var costs: Array[String] = []
+	for kind in d.get("penalty", {}):
+		costs.append("%d%% %s" % [int(round((float(d["penalty"][kind]) - 1.0) * 100.0)),
+				_kind_name(kind)])
+	var out := ", ".join(parts)
+	if not costs.is_empty():
+		out += "   paid for with " + ", ".join(costs)
+	return out
+
+
+func _kind_name(kind: String) -> String:
+	for job_id in Balance.JOB_ORDER:
+		if String(Balance.JOBS[job_id]["kind"]) == kind:
+			return String(Balance.JOBS[job_id]["name"]).to_lower()
+	return kind
+
+
+# --- Council ----------------------------------------------------------------
+
+## A question with a clock. Ignoring it is a real choice - the elders take the
+## safe option, which is never a disaster and never the best.
+func _open_council() -> void:
+	if Sim.council_id == "" or _council_dialog != null:
+		return
+	var id := Sim.council_id
+	var c: Dictionary = Balance.COUNCIL[id]
+
+	var dlg := AcceptDialog.new()
+	_council_dialog = dlg
+	dlg.title = String(c["title"])
+	dlg.ok_button_text = "Let the elders decide"
+	dlg.min_size = Vector2i(560, 340)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	dlg.add_child(v)
+	var body := _wrapped(String(c["text"]), 13, TEXT)
+	body.custom_minimum_size.x = 500
+	v.add_child(body)
+
+	for opt in c["options"]:
+		var row := _card()
+		var label := String(opt["label"])
+		if bool(opt.get("safe", false)):
+			label += "   (what they will do anyway)"
+		var btn := Button.new()
+		btn.text = label
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		var choice := String(opt["id"])
+		btn.pressed.connect(func() -> void:
+			Sim.answer_council(choice)
+			dlg.hide())
+		row.add_child(btn)
+		row.add_child(_wrapped(String(opt["detail"])))
+		v.add_child(_panel_of(row))
+
+	dlg.close_requested.connect(func() -> void:
+		_council_dialog = null
+		dlg.queue_free())
+	dlg.confirmed.connect(func() -> void:
+		_council_dialog = null
+		dlg.queue_free())
+	add_child(dlg)
+	dlg.popup_centered()
 
 
 # --- Dynamic lists ----------------------------------------------------------
@@ -703,9 +865,50 @@ func _refresh_summary() -> void:
 		bits.append("%s Legacy (+%d%% to everything)" % [Balance.fmt(Sim.legacy_points),
 				int(round(Sim.legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0))])
 	if Sim.omen_active():
-		bits.append("[omen: everything doubled]")
+		bits.append("omen: everything doubled")
+	if Sim.momentum_active():
+		bits.append("momentum x%d (+%d%%)" % [Sim.momentum,
+				int(round(Sim.momentum * Balance.MOMENTUM_PER_BOON * 100.0))])
+	if Sim.festival_active():
+		bits.append("festival on")
+	if Sim.decree != "":
+		bits.append("decree: %s" % Balance.DECREES[Sim.decree]["name"])
+	if not Sim.outposts.is_empty():
+		bits.append("%d outposts" % Sim.outposts.size())
 	_summary.text = "  -  ".join(bits)
 	_plan_label.text = Sim.plan_reason if Sim.auto_assign else "Work assigned by hand."
+
+	# Decrees
+	var can_switch := Sim.can_set_decree()
+	_rule_note.text = ("A decree can be changed again in %d days." % int(ceil(Sim.decree_cooldown))
+			) if not can_switch else "Held until you change it. Switching has a cooldown."
+	for box in _decree_list.get_children():
+		if not box.has_meta("id"):
+			continue
+		var id: String = box.get_meta("id")
+		var active := Sim.decree == id
+		(box.get_meta("btn") as Button).disabled = not can_switch or active
+		(box.get_meta("btn") as Button).text = "In force" if active else "Issue this decree"
+		(box.get_meta("name") as Label).add_theme_color_override("font_color",
+				ACCENT if active else Balance.DECREES[id]["color"])
+
+	if Sim.can_hold_festival():
+		_festival_button.text = "Hold a festival"
+		_festival_button.disabled = false
+	elif Sim.festival_cooldown > 0.0:
+		_festival_button.text = "Festival (in %d days)" % int(ceil(Sim.festival_cooldown))
+		_festival_button.disabled = true
+	else:
+		_festival_button.text = "Festival (not enough food)"
+		_festival_button.disabled = true
+
+	var oc := Sim.outpost_cost()
+	_outpost_button.text = ("Click the map to place  (cancel)" if _placing_outpost
+			else "Found an outpost  -  %s" % _cost_text(oc).replace("Costs ", ""))
+	_outpost_button.disabled = Sim.outposts.size() >= Balance.OUTPOST_MAX
+
+	if Sim.council_id != "" and _council_dialog == null:
+		_open_council()
 
 	for key in _sparks:
 		(_sparks[key] as Sparkline).set_values(Sim.history.get(key, PackedFloat32Array()))
@@ -989,6 +1192,9 @@ func _set_speed(index: int) -> void:
 
 
 func _on_game_reset() -> void:
+	_placing_outpost = false
+	if _map != null:
+		_map.placing_outpost = false
 	_queue_signature = "!"
 	_rebuild_lists()
 	_replay_log()
@@ -1184,6 +1390,23 @@ func _open_settings() -> void:
 
 	v.add_child(_heading("DANGER"))
 	var reset_row := HBoxContainer.new()
+	var art_row := HBoxContainer.new()
+	var art_btn := Button.new()
+	art_btn.text = "Reload artwork"
+	art_btn.tooltip_text = ("Rescans assets/ and user://assets/. Drop sprites in and press "
+			+ "this - nothing needs restarting. See assets/README.md.")
+	art_btn.pressed.connect(func() -> void:
+		Art.reload()
+		for id in _resource_rows:
+			var icon: TextureRect = _resource_rows[id]["icon"]
+			icon.texture = Art.resource_icon(id)
+			icon.visible = icon.texture != null
+		_dirty = true)
+	art_row.add_child(art_btn)
+	art_row.add_child(_text("%d replacement textures loaded" % Art.count(), 12, MUTED))
+	v.add_child(art_row)
+
+	v.add_child(_heading("DANGER"))
 	var defaults := Button.new()
 	defaults.text = "Restore defaults"
 	defaults.pressed.connect(func() -> void:
