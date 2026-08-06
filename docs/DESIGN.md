@@ -165,6 +165,50 @@ farming exists. Wild timber saturates, so woodlots exist. Stone and ore never
 deplete. Any resource without an unbounded source becomes the wall the whole
 economy stops at - wood was exactly that until woodlots were added.
 
+## Why managing beats leaving it alone
+
+An early build had a real problem: the autopilot was good enough that touching
+it gained you nothing. Every decision in the game was *locally optimisable* -
+"how many woodcutters" has one right answer and the planner computes it
+perfectly - so a player could only match it.
+
+The fix is not a worse autopilot. It is decisions an optimiser should not be
+making on your behalf, of three kinds:
+
+**Commitments.** A decree is a large bonus to one thing paid for with a real
+penalty to another, held until you change it, with a cooldown. There is no
+correct decree - only one that matches what you think the next hundred days
+need. The elders will not gamble the settlement on a guess.
+
+**Gambles with a mediocre default.** A council question has a clock and a
+`safe` option the elders take if nobody answers. Safe is deliberately never a
+disaster and never the best. That gap *is* the value of paying attention.
+
+**Moments.** Boons are brief and visible, and catching several in a row
+compounds. A festival spends a third of the granary on a party - no optimiser
+does that; every civilisation does.
+
+**And one judgement about place rather than quantity:** where to found an
+outpost. The planner can rank trades in a single currency, but it cannot tell
+you that a particular hillside is worth holding.
+
+Two things had to change for this to show up in the numbers at all:
+
+- **The build pipeline was serial**, one order a day, which meant a five-fold
+  economy could not spend itself. Orders queue several deep now and surplus
+  builder-effort rolls onto the next one.
+- **Population is logarithmic in resources under any geometric cost.** That is
+  arithmetic, not tuning: if the nth building costs `g^n`, the count you can
+  afford grows with `log(income)`. A settlement producing nine times as much
+  housed eleven per cent more people, so the number the player actually watches
+  barely moved. Shelter now climbs at 1.04 rather than 1.15, which hands the
+  limit back to food - exactly what the ecology model was always supposed to
+  decide. Flat was a step too far and the whole economy ran away.
+
+The claim is tested rather than asserted. `_test_engagement` runs one seed
+twice, identical but for the levers above, and fails the build if managing does
+not win by a clear margin.
+
 ## Structure
 
 `Sim.gd` advances in fixed 0.1-day substeps regardless of frame rate, so the
