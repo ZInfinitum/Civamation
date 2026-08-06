@@ -66,6 +66,14 @@ Render a real frame to a PNG (needs a display, or `xvfb-run`):
 godot --path . --resolution 1280x720 res://tools/Screenshot.tscn -- --days 300 --out shot.png
 ```
 
+## The year turns
+
+Four seasons multiply what every trade brings in. Spring is for foraging,
+summer for the fields, autumn for the harvest and the hunt at once, and winter
+for whatever is in the store. It is one extra term in the multiplier chain and
+it gives the whole game a rhythm — and it makes *when* you issue a decree a real
+question.
+
 ## Running it yourself vs leaving it running
 
 The elders manage the settlement sensibly and will never do any of the
@@ -98,9 +106,19 @@ a **Reload artwork** button. See [assets/README.md](assets/README.md).
 ## Legacy
 
 When a civilisation has done enough, you can set it down. Everything standing
-is lost - the buildings, the fields, the people, the map - and what survives is
-what they worked out. Legacy is a permanent percentage on every trade in every
-run afterwards, earned from everything this one ever produced.
+is lost — the buildings, the fields, the people, the map — and what survives is
+what they worked out.
+
+Legacy is banked in your **profile**, not the save file, so it survives starting
+a new world. It buys a flat percentage on every trade, and it buys **perks** —
+permanent unlocks that every civilisation after this one is born knowing. Begin
+with fire already carried, with the country already walked, with the first plots
+already broken.
+
+The **Chronicle** keeps what happened: the era it happened in, and the people
+worth remembering. **Achievements** are for odd play rather than for playing —
+reaching the Neolithic without a single hunter, or the Age of Steel on an
+archipelago.
 
 ## Controls
 
@@ -143,6 +161,7 @@ tools/screenshot.gd      render a real frame to a PNG
 docs/DESIGN.md           how the simulation works and why
 docs/PLATFORMS.md        what shipping to Steam, Xbox, console and web takes
 docs/NEXT.md             how much detail this can afford, and what to build next
+docs/BACKLOG.md          everything worth building, with effort and impact
 ```
 
 Two files matter most. **`Balance.gd`** holds every number and every data table

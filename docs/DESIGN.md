@@ -209,6 +209,31 @@ The claim is tested rather than asserted. `_test_engagement` runs one seed
 twice, identical but for the levers above, and fails the build if managing does
 not win by a clear margin.
 
+## The damping that keeps it a game
+
+An exponential economy with a population feedback loop wants to run away, and
+this one did — twice, in ways worth recording because they will be
+reintroduced by anyone who does not know.
+
+**Elders have diminishing returns to headcount.** `k = n^0.58`, not `n`. Linear
+elders closed a loop — more people, more elders, more knowledge, more upgrades,
+more food, more people — that took a run from three hundred to eighteen thousand
+people in two hundred and fifty days and exhausted the entire tech tree in
+seventeen minutes of play. This single exponent is the most important number in
+the file.
+
+**Ten upgrade tiers at 1.75x, not twelve at 2x.** 4,096x per trade, unlocking on
+output that the multipliers themselves produce, is doubly exponential. 269x is
+a strong ladder that paces a run rather than being climbed in an afternoon.
+
+**Thinkers are capped at a third of the workforce.** Forty-six thousand elders
+out of forty-six thousand people is not a settlement, and the knowledge they
+produced fed straight back into the multipliers.
+
+The general shape: *any* system where output feeds a multiplier that feeds
+output needs one sub-linear term somewhere, and it is worth putting it where it
+is thematically true rather than where it is convenient.
+
 ## Structure
 
 `Sim.gd` advances in fixed 0.1-day substeps regardless of frame rate, so the

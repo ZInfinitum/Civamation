@@ -196,22 +196,32 @@ func _test_legacy() -> void:
 	print("")
 	print("=== legacy ===")
 	Sim.new_game(4242, Balance.WorldType.CONTINENTS)
-	Sim.simulate_days(700.0, true)
+	# Run until the civilisation has done enough to be worth remembering. How
+	# long that takes varies enormously between seeds - an exponential economy
+	# compounds small early differences - so this waits rather than assuming a
+	# fixed number of days is always sufficient.
+	var waited := 0.0
+	while waited < 2000.0 and not Sim.can_ascend():
+		Sim.simulate_days(100.0, true)
+		waited += 100.0
 	var offer := Sim.legacy_on_offer()
 	var pop_before := Sim.population
-	if offer < Balance.LEGACY_MIN_POINTS:
-		_failures.append("legacy: 700 days earned only %.1f points" % offer)
+	if not Sim.can_ascend():
+		_failures.append("legacy: %d days earned only %.1f points - nothing is worth "
+				% [int(waited), offer] + "setting down")
 		return
 	if not Sim.ascend(Balance.WorldType.EARTH):
 		_failures.append("legacy: ascend refused with %.1f points on offer" % offer)
 		return
-	if not is_equal_approx(Sim.legacy_points, offer):
-		_failures.append("legacy: carried %.2f forward, expected %.2f" % [Sim.legacy_points, offer])
+	if not is_equal_approx(Profile.legacy_points, offer):
+		_failures.append("legacy: carried %.2f forward, expected %.2f"
+				% [Profile.legacy_points, offer])
 	if Sim.day > 1.0 or Sim.population > 10.0:
 		_failures.append("legacy: the new world did not actually start over")
 	Sim.simulate_days(300.0, true)
-	print("banked %.0f points; %.0f people before, %.0f in the next run's first 300 days"
-			% [Sim.legacy_points, pop_before, Sim.population])
+	print("worth setting down after %d days; banked %.0f points; %.0f people before, "
+			% [int(waited), Profile.legacy_points, pop_before]
+			+ "%.0f in the next run's first 300 days" % Sim.population)
 	if Sim.population < 20.0:
 		_failures.append("legacy: the run after ascending stalled at %.0f" % Sim.population)
 

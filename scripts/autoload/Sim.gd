@@ -63,11 +63,28 @@ var researching: String = ""
 var era: int = 0
 
 # --- Legacy (prestige) ---
-## Banked across runs. Every point is a flat percentage on every trade, for ever.
-var legacy_points: float = 0.0
 ## Everything this civilisation has ever produced, which is what Legacy is
 ## earned from. Summed across trades - it is a score, not a quantity.
+## The banked points themselves live in Profile, because they are the player's
+## and must survive "New World".
 var lifetime_output: float = 0.0
+
+# --- Season, chronicle, notables ---
+var season: int = 0
+## Significant entries kept as the civilisation's own history.
+var chronicle: Array[Dictionary] = []
+## Named individuals attached to things that actually happened.
+var notables: Array[Dictionary] = []
+## Index of the next opening prompt, and the current one's text.
+var beat: int = 0
+var beat_text := ""
+## Standing exchange: what goes out, what comes back. Player-set only.
+var trade_sell := ""
+var trade_buy := ""
+## Filled in when a save is loaded after time away, for the digest.
+var offline_digest := {}
+## Consecutive days the people have gone hungry, for the hungry-decade mark.
+var hunger_days: float = 0.0
 
 # --- Boons ---
 var boon_id := ""
@@ -188,6 +205,15 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_seen_biomes.clear()
 	_milestone = 0
 	lifetime_output = 0.0
+	season = 0
+	chronicle.clear()
+	notables.clear()
+	beat = 0
+	beat_text = ""
+	trade_sell = ""
+	trade_buy = ""
+	offline_digest = {}
+	hunger_days = 0.0
 	boon_id = ""
 	boon_tile = -1
 	_omen_until = -1.0
@@ -246,12 +272,53 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_auto_assign_jobs()
 	_last_pop_int = int(population)
 
+	_apply_perks()
+	Profile.note_shape(p_type)
+
 	var here: String = Balance.BIOME_INFO[world.biome[world.idx(world.origin.x, world.origin.y)]]["name"]
 	_seen_biomes.append(world.biome[world.idx(world.origin.x, world.origin.y)])
 	add_log("Six of you stop walking. This place has water, and the grass is thick. It will do for now.", "era")
 	add_log("The band makes camp on %s. Nobody here knows what is over the next ridge." % String(here).to_lower(), "info")
 	game_reset.emit()
 	state_changed.emit()
+
+
+## Permanent unlocks bought with Legacy. Applied once, at the start of a run,
+## before anyone has done anything - which is the point of them.
+func _apply_perks() -> void:
+	if Profile.has_perk("remembered_fire"):
+		for t in ["fire_mastery", "stone_tools"]:
+			if not techs.has(t):
+				techs.append(t)
+	if Profile.has_perk("seed_stock"):
+		# The whole prerequisite chain, or the tech tree stops making sense.
+		for t in ["fire_mastery", "stone_tools", "shared_stories", "preservation",
+				"settlement", "basketry", "pottery", "agriculture"]:
+			if not techs.has(t):
+				techs.append(t)
+		buildings["farm_plot"] = 5
+	if Profile.has_perk("full_granary"):
+		resources["food"] += 400.0
+		resources["wood"] += 300.0
+		resources["stone"] += 150.0
+		resources["hides"] += 60.0
+	if Profile.has_perk("old_maps"):
+		for k in 220:
+			if world.reveal_one() < 0:
+				break
+	_mods_dirty = true
+	_rebuild_mods()
+	_update_territory()
+
+
+## How far the speed control goes. Four is far too slow once a decision takes a
+## hundred days to pay off, so the later ones unlock with the eras.
+func max_speed_index() -> int:
+	var top := 0
+	for i in Balance.SPEEDS.size():
+		if era >= int(Balance.SPEED_UNLOCK_ERA[i]):
+			top = i
+	return top
 
 
 func _process(delta: float) -> void:
@@ -278,10 +345,25 @@ func run_offline(days: float) -> void:
 	var capped := minf(days, Balance.MAX_OFFLINE_HOURS * 3600.0 / Balance.SECONDS_PER_DAY)
 	if capped <= 0.5:
 		return
-	var pop_before := population
+	var before := {
+		"pop": population, "era": era, "techs": techs.size(),
+		"upgrades": upgrades.size(), "output": lifetime_output,
+		"explored": world.explored_fraction(), "council": council_by_elders,
+	}
 	simulate_days(capped, true)
+	# The data was always there; only the telling was missing.
+	offline_digest = {
+		"days": int(capped),
+		"pop_before": before["pop"], "pop_after": population,
+		"techs": techs.size() - int(before["techs"]),
+		"upgrades": upgrades.size() - int(before["upgrades"]),
+		"eras": era - int(before["era"]),
+		"explored": (world.explored_fraction() - float(before["explored"])) * 100.0,
+		"elders_decided": council_by_elders - int(before["council"]),
+		"output": lifetime_output - float(before["output"]),
+	}
 	add_log("While you were away: %d days passed, and the people went from %s to %s."
-			% [int(capped), Balance.fmt_count(pop_before), Balance.fmt_count(population)], "info")
+			% [int(capped), Balance.fmt_count(before["pop"]), Balance.fmt_count(population)], "info")
 	state_changed.emit()
 
 
@@ -421,6 +503,7 @@ func _on_revealed(i: int, offline: bool) -> void:
 			resources["knowledge"] += float(Balance.TECHS[target]["cost"])
 			add_log("Ruins. Someone was here long before you, and left enough behind "
 					+ "to finish a thought your elders had started.", "tech")
+			_add_notable("ruins", "They brought the marks back from the ruins.")
 		else:
 			resources["knowledge"] += 40.0 + population * 0.8
 			add_log("Ruins on the frontier - old walls, and marks nobody can read.", "tech")
@@ -453,15 +536,19 @@ func ascend(world_type: int = -1) -> bool:
 	if not can_ascend():
 		return false
 	var gained := legacy_on_offer()
-	var keep := legacy_points + gained
+	if day < 400.0:
+		_award("early_ascent")
+	Profile.runs_completed += 1
+	var keep := Profile.legacy_points + gained
 	var shape := world.world_type if world_type < 0 else world_type
 	new_game(0, shape)
-	legacy_points = keep
+	Profile.legacy_points = keep
+	Profile.save_profile()
 	_mods_dirty = true
 	_rebuild_mods()
 	add_log("The old country is behind you. %s Legacy carried forward - every trade "
 			% Balance.fmt(gained) + "begins %d%% better than it did before."
-			% int(round(legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0)), "era")
+			% int(round(Profile.legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0)), "era")
 	ascended.emit(gained)
 	state_changed.emit()
 	return true
@@ -596,7 +683,7 @@ func _write_csv_row() -> void:
 		row.append(str(int(jobs.get(job, 0))))
 	row.append_array([str(techs.size()), str(upgrades.size()), str(era),
 			"%.1f" % (world.explored_fraction() * 100.0), str(world.territory.size()),
-			"%.1f" % legacy_points])
+			"%.1f" % Profile.legacy_points])
 	_csv.store_line(",".join(row))
 
 
@@ -608,6 +695,11 @@ func surge(days: float) -> void:
 
 
 func _daily_world_tick() -> void:
+	season = int(fmod(day, Balance.DAYS_PER_YEAR) / (Balance.DAYS_PER_YEAR * 0.25)) % 4
+	_run_trade()
+	_check_beats()
+	_check_achievements()
+	Profile.note_population(population)
 	_sample_history()
 	_write_csv_row()
 	if not Settings.reduce_motion:
@@ -710,6 +802,143 @@ func _wreck_buildings(count: int) -> void:
 		_mods_dirty = true
 
 
+# --- Seasons, opening, chronicle, trade -------------------------------------
+
+func season_name() -> String:
+	return String(Balance.SEASONS[season]["name"])
+
+
+## The next thing worth telling a new player, or "" once they are past it. The
+## settlement gets there on its own either way - these only teach the order the
+## systems matter in.
+func _check_beats() -> void:
+	if beat >= Balance.OPENING_BEATS.size():
+		beat_text = ""
+		return
+	var id: String = Balance.OPENING_BEATS[beat]["id"]
+	var done := false
+	match id:
+		"fire": done = int(buildings.get("firepit", 0)) > 0
+		"scout": done = int(job_peak.get("explorer", 0)) > 0
+		"shelter": done = int(buildings.get("windbreak", 0)) + int(buildings.get("hut", 0)) > 0
+		"decree": done = decree != ""
+		"winter": done = day > Balance.DAYS_PER_YEAR
+	if done:
+		beat += 1
+		beat_text = ""
+		_check_beats()
+		return
+	beat_text = String(Balance.OPENING_BEATS[beat]["text"])
+
+
+## A standing exchange. Sends out a slice of one good's production and brings
+## back another, minus the caravan's cut, for a little gold a day.
+func can_trade() -> bool:
+	return techs.has(Balance.TRADE_UNLOCK_TECH)
+
+
+func set_trade(sell: String, buy: String) -> void:
+	if sell == buy:
+		sell = ""
+		buy = ""
+	trade_sell = sell
+	trade_buy = buy
+	if sell == "":
+		add_log("The trade route is closed.", "info")
+	else:
+		add_log("A standing exchange: %s out, %s back." % [
+				String(Balance.RESOURCES[sell]["name"]).to_lower(),
+				String(Balance.RESOURCES[buy]["name"]).to_lower()], "era")
+	state_changed.emit()
+
+
+func _run_trade() -> void:
+	if trade_sell == "" or trade_buy == "" or not can_trade():
+		return
+	var upkeep := population * 0.01 * Balance.TRADE_GOLD_UPKEEP
+	if resources["gold"] < upkeep:
+		trade_sell = ""
+		trade_buy = ""
+		add_log("There is no gold left to keep the caravans coming. The route lapses.", "bad")
+		return
+	resources["gold"] -= upkeep
+	var out: float = production.get(trade_sell, 0.0) * Balance.TRADE_EXPORT_FRACTION
+	if out <= 0.0:
+		return
+	out = minf(out, resources[trade_sell])
+	resources[trade_sell] -= out
+	var sell_value := float(Balance.RESOURCE_VALUE.get(trade_sell, 1.0))
+	var buy_value := maxf(0.01, float(Balance.RESOURCE_VALUE.get(trade_buy, 1.0)))
+	resources[trade_buy] += out * sell_value / buy_value * Balance.TRADE_EFFICIENCY
+
+
+## A name attached to something that actually happened.
+func _add_notable(kind: String, what: String) -> void:
+	var names: Array = Balance.GIVEN_NAMES
+	var roles: Array = Balance.NOTABLE_ROLES.get(kind, ["who was there"])
+	var entry := {
+		"name": String(names[randi() % names.size()]),
+		"role": String(roles[randi() % roles.size()]),
+		"what": what,
+		"day": int(day),
+		"era": era,
+	}
+	notables.append(entry)
+	if notables.size() > 60:
+		notables.remove_at(0)
+	add_log("%s, %s. %s" % [entry["name"], entry["role"], what], "era")
+
+
+func _chronicle(text: String, kind: String) -> void:
+	chronicle.append({"day": int(day), "era": era, "text": text, "kind": kind})
+	if chronicle.size() > 200:
+		chronicle.remove_at(0)
+
+
+# --- Achievements -----------------------------------------------------------
+
+func _check_achievements() -> void:
+	if era >= 2 and float(job_lifetime.get("hunter", 0.0)) <= 0.0:
+		_award("vegetarian")
+	if era >= 5 and world.world_type == Balance.WorldType.ARCHIPELAGO:
+		_award("island_steel")
+	if world.explored_fraction() > 0.995 or (not world.frontier_open() and world.explored_fraction() > 0.6):
+		_award("cartographer")
+	if Profile.shapes_played.size() >= Balance.WORLD_TYPES.size():
+		_award("all_shapes")
+	if population >= 10000.0:
+		_award("myriad")
+	if era >= 3 and world.stock_health(world.game, world.game_cap) > 0.8 \
+			and world.stock_health(world.forest, world.forest_cap) > 0.8:
+		_award("untouched")
+	if momentum >= 5:
+		_award("chain")
+	if hunger_days > 100.0 and food_satisfaction > 0.99 and population > peak_population * 0.9:
+		_award("deep_winter")
+	# Every tier of one trade, which needs both the output and the knowledge.
+	for job_id in Balance.JOB_ORDER:
+		var kind := String(Balance.JOBS[job_id]["kind"])
+		var all := true
+		for tier in Balance.UPGRADE_TIERS.size():
+			if not _tier_owned(kind, tier):
+				all = false
+				break
+		if all:
+			_award("mastery")
+			break
+
+
+func _tier_owned(kind: String, tier: int) -> bool:
+	if Balance.BRANCH_TIERS.has(tier):
+		return upgrades.has("%s_%d_deep" % [kind, tier]) or upgrades.has("%s_%d_broad" % [kind, tier])
+	return upgrades.has(upgrade_id(kind, tier))
+
+
+func _award(id: String) -> void:
+	if Profile.award(id):
+		add_log("%s - %s" % [Balance.ACHIEVEMENTS[id]["name"], Balance.ACHIEVEMENTS[id]["desc"]], "good")
+
+
 # --- Player-only levers -----------------------------------------------------
 ## Everything below is deliberately outside the autopilot's reach. Not because
 ## the code could not do it, but because none of it has a computable right
@@ -729,6 +958,8 @@ func set_decree(id: String) -> bool:
 		return true
 	decree = id
 	decree_cooldown = Balance.DECREE_SWITCH_COOLDOWN_DAYS
+	if Profile.has_perk("restless"):
+		decree_cooldown *= 0.5
 	_mods_dirty = true
 	if id == "":
 		add_log("The decree is lifted. Everyone goes back to their own business.", "info")
@@ -835,6 +1066,9 @@ func found_outpost(tile: int) -> bool:
 	# An outpost is somewhere people are, so it sees its own country.
 	add_log("An outpost is founded %d tiles out. It sends back what the ground there gives."
 			% int(Vector2(world.tile_pos(tile) - world.origin).length()), "era")
+	_chronicle("An outpost founded %d tiles out."
+			% int(Vector2(world.tile_pos(tile) - world.origin).length()), "era")
+	_add_notable("outpost", "They walked out to the new ground and did not come back.")
 	state_changed.emit()
 	return true
 
@@ -955,8 +1189,11 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 			resources["knowledge"] += 40.0 + population * 1.0
 			_note("She gets on with it in the afternoons.", offline)
 
+	_chronicle("%s - %s." % [Balance.COUNCIL[id]["title"], choice.replace("_", " ")], "council")
 	if by_elders:
 		add_log("(The elders decided this one themselves.)", "info")
+	elif randf() < 0.4:
+		_add_notable("council", "It was their argument that carried the day.")
 	council_closed.emit(id, choice, by_elders)
 	state_changed.emit()
 
@@ -1032,6 +1269,8 @@ func _mult(kind: String) -> float:
 		m *= float((d["penalty"] as Dictionary).get(kind, 1.0))
 	if kind == "knowledge" and day < festival_until:
 		m *= Balance.FESTIVAL_KNOWLEDGE_MULT
+	# The year turns. This is the whole of the seasons system.
+	m *= float((Balance.SEASONS[season]["mult"] as Dictionary).get(kind, 1.0))
 	return m
 
 
@@ -1134,10 +1373,17 @@ func _produce(dt: float) -> void:
 
 	# Knowledge: ambient learning plus dedicated elders.
 	var k_rate := Balance.AMBIENT_KNOWLEDGE * sqrt(maxf(population, 1.0))
-	k_rate += float(jobs.get("thinker", 0)) * Balance.KNOWLEDGE_PER_THINKER * _mult("knowledge")
+	# Sub-linear in headcount, and this is the single most important damping in
+	# the game. Linear elders closed a loop - more people, more elders, more
+	# knowledge, more upgrades, more food, more people - that took a run from
+	# three hundred to eighteen thousand in two hundred and fifty days and
+	# exhausted the whole tech tree in seventeen minutes. Research has
+	# diminishing returns to headcount in reality too.
+	k_rate += pow(float(jobs.get("thinker", 0)), Balance.THINKER_EXPONENT) \
+			* Balance.KNOWLEDGE_PER_THINKER * _mult("knowledge")
 	k_rate *= _knowledge_mult
-	_last_gross["thinker"] = float(jobs.get("thinker", 0)) * Balance.KNOWLEDGE_PER_THINKER \
-			* _mult("knowledge") * _knowledge_mult
+	_last_gross["thinker"] = pow(float(jobs.get("thinker", 0)), Balance.THINKER_EXPONENT) \
+			* Balance.KNOWLEDGE_PER_THINKER * _mult("knowledge") * _knowledge_mult
 	production["knowledge"] += k_rate
 	resources["knowledge"] += k_rate * dt
 
@@ -1230,6 +1476,8 @@ func _consume_and_grow(dt: float) -> void:
 		k_water = maxf(k_water, population)
 	carrying_capacity = minf(minf(k_food, k_water), housing)
 
+	if need_score < Balance.FAMINE_THRESHOLD:
+		hunger_days += dt
 	if need_score < Balance.FAMINE_THRESHOLD and not _famine_latch:
 		_famine_latch = true
 		if food_satisfaction <= water_satisfaction:
@@ -1330,7 +1578,13 @@ func job_output_per_worker(id: String) -> float:
 		"timber": return _timber_per_worker()
 		"ore": return _ore_per_worker()
 		"explore": return Balance.EXPLORE_PER_SCOUT * _mult("explore")
-		"knowledge": return Balance.KNOWLEDGE_PER_THINKER * _mult("knowledge") * _knowledge_mult
+		"knowledge":
+			# Marginal, not average: what the *next* elder adds, which is what
+			# the planner should be sizing against.
+			var n := float(jobs.get("thinker", 0))
+			var marginal := pow(n + 1.0, Balance.THINKER_EXPONENT) - pow(n, Balance.THINKER_EXPONENT)
+			return maxf(marginal, 0.05) * Balance.KNOWLEDGE_PER_THINKER \
+					* _mult("knowledge") * _knowledge_mult
 		"build": return Balance.BUILDER_WORK_PER_DAY * _mult("build")
 	return 0.0
 
@@ -1511,6 +1765,14 @@ func _auto_assign_jobs() -> void:
 		food_target = eat * 1.1
 	if _well_stocked("food"):
 		food_target = eat * 0.75
+	# Lay in stores before the fields stop giving. Without this the settlement
+	# walked into every winter with a fortnight of food and was caught by the
+	# never-lose floor annually - the safety net doing work the planner should
+	# have done.
+	if season == 2: # autumn
+		food_target *= 1.9
+	elif season == 3: # winter
+		food_target *= 1.35
 
 	# Hold a few hands back from the food quest. A tribe that puts every last
 	# pair of hands on hunting can never build the thing that would end the
@@ -1618,8 +1880,13 @@ func _auto_assign_jobs() -> void:
 		# upgrades unlock on output rather than headcount there is always another
 		# one coming, so this never becomes busy-work.
 		if left > 0 and job_unlocked("thinker"):
-			jobs["thinker"] = int(jobs.get("thinker", 0)) + left
-			left = 0
+			# Capped. Everyone spare becoming an elder turned knowledge into a
+			# second runaway - and a settlement where four in five people are
+			# thinking is not a settlement.
+			var think_cap := maxi(1, int(float(total) * 0.35))
+			var take := clampi(think_cap - int(jobs.get("thinker", 0)), 0, left)
+			jobs["thinker"] = int(jobs.get("thinker", 0)) + take
+			left -= take
 
 	# --- 6. Never let a small band get wood-locked. The fire pit and the first
 	# windbreaks are the bottom rung of the ladder, and if every pair of hands is
@@ -2029,6 +2296,9 @@ func _complete_tech(id: String) -> void:
 	_rebuild_mods()
 	var t: Dictionary = Balance.TECHS[id]
 	add_log("%s: %s" % [t["name"], t["desc"]], "tech")
+	_chronicle("%s." % t["name"], "tech")
+	if randf() < 0.22:
+		_add_notable("tech", "It was %s that finally settled it." % t["name"])
 	if ore_tier() != tier_before:
 		var tier: Dictionary = Balance.ORE_TIERS[ore_tier()]
 		add_log("The seams give up %s now. %s" % [String(tier["name"]).to_lower(), tier["note"]], "good")
@@ -2046,37 +2316,109 @@ func upgrade_id(kind: String, tier: int) -> String:
 	return "%s_%d" % [kind, tier]
 
 
+## Branch tiers come as a pair and buying one closes the other for the run.
+func is_branch_tier(tier: int) -> bool:
+	return Balance.BRANCH_TIERS.has(tier)
+
+
+func branch_id(kind: String, tier: int, side: String) -> String:
+	return "%s_%d_%s" % [kind, tier, side]
+
+
+## Split an id back into (kind, tier, side). Side is "" for ordinary upgrades.
+func upgrade_parts(id: String) -> Array:
+	var bits := id.split("_")
+	if bits.size() < 2:
+		return ["", -1, ""]
+	var side := ""
+	var tier_at := bits.size() - 1
+	if bits[tier_at] == "deep" or bits[tier_at] == "broad":
+		side = bits[tier_at]
+		tier_at -= 1
+	var tier := int(bits[tier_at])
+	var kind := "_".join(Array(bits).slice(0, tier_at))
+	return [kind, tier, side]
+
+
 func upgrade_name(id: String) -> String:
-	var parts := id.rsplit("_", true, 1)
-	if parts.size() != 2:
-		return id
-	var names: Array = Balance.UPGRADE_NAMES.get(parts[0], [])
-	var tier := int(parts[1])
-	if tier < names.size():
-		return String(names[tier])
-	return "%s improvement %d" % [parts[0].capitalize(), tier + 1]
+	var parts := upgrade_parts(id)
+	var kind: String = parts[0]
+	var tier: int = parts[1]
+	var side: String = parts[2]
+	var names: Array = Balance.UPGRADE_NAMES.get(kind, [])
+	var base := String(names[tier]) if tier >= 0 and tier < names.size() \
+			else "%s improvement %d" % [kind.capitalize(), tier + 1]
+	if side == "deep":
+		return base + " (Deep)"
+	if side == "broad":
+		return base + " (Broad)"
+	return base
 
 
 func upgrade_cost(id: String) -> float:
-	var parts := id.rsplit("_", true, 1)
-	if parts.size() != 2:
-		return INF
-	var tier := int(parts[1])
-	if tier >= Balance.UPGRADE_TIERS.size():
+	var tier: int = upgrade_parts(id)[1]
+	if tier < 0 or tier >= Balance.UPGRADE_TIERS.size():
 		return INF
 	return float(Balance.UPGRADE_TIERS[tier]["cost"])
 
 
-## Which job kind an upgrade improves, and the job that shows it.
+## What buying this would do, in words - the two sides of a branch have to be
+## legible or the choice is a coin flip.
+func upgrade_effect_text(id: String) -> String:
+	var parts := upgrade_parts(id)
+	var kind: String = parts[0]
+	var side: String = parts[2]
+	var partner: String = Balance.BRANCH_PARTNER.get(kind, "")
+	if side == "":
+		return "%s produce twice as much." % _kind_job_name(kind)
+	var spec: Dictionary = Balance.BRANCH_DEEP if side == "deep" else Balance.BRANCH_BROAD
+	var self_pct := int(round((float(spec["self"]) - 1.0) * 100.0))
+	var other_pct := int(round((float(spec["other"]) - 1.0) * 100.0))
+	if partner == "":
+		return "%s %+d%%." % [_kind_job_name(kind), self_pct]
+	return "%s %+d%%, %s %+d%%." % [_kind_job_name(kind), self_pct,
+			_kind_job_name(partner), other_pct]
+
+
+func _kind_job_name(kind: String) -> String:
+	for job_id in Balance.JOB_ORDER:
+		if String(Balance.JOBS[job_id]["kind"]) == kind:
+			return String(Balance.JOBS[job_id]["name"])
+	return kind
+
+
+## Which job an upgrade improves.
 func upgrade_job(id: String) -> String:
-	var kind := id.rsplit("_", true, 1)[0]
+	var kind: String = upgrade_parts(id)[0]
 	for job_id in Balance.JOB_ORDER:
 		if String(Balance.JOBS[job_id]["kind"]) == kind:
 			return job_id
 	return ""
 
 
-## Every upgrade currently offered: unlocked by headcount, not yet bought.
+## Unlocked by lifetime output, not yet bought, and - on a branch tier - not
+## closed off by having taken the other side.
+func upgrade_offered(id: String) -> bool:
+	if upgrades.has(id):
+		return false
+	var parts := upgrade_parts(id)
+	var kind: String = parts[0]
+	var tier: int = parts[1]
+	var side: String = parts[2]
+	if tier < 0 or tier >= Balance.UPGRADE_TIERS.size():
+		return false
+	if is_branch_tier(tier) != (side != ""):
+		return false
+	if side != "":
+		var other := branch_id(kind, tier, "broad" if side == "deep" else "deep")
+		if upgrades.has(other):
+			return false
+	var job_id := upgrade_job(id)
+	if job_id == "" or not job_unlocked(job_id):
+		return false
+	return float(job_lifetime.get(job_id, 0.0)) >= float(Balance.UPGRADE_TIERS[tier]["output"])
+
+
 func available_upgrades() -> Array[String]:
 	var out: Array[String] = []
 	for job_id in Balance.JOB_ORDER:
@@ -2087,15 +2429,20 @@ func available_upgrades() -> Array[String]:
 		for tier in Balance.UPGRADE_TIERS.size():
 			if made < float(Balance.UPGRADE_TIERS[tier]["output"]):
 				break # tiers are ordered, so nothing further is unlocked either
-			var id := upgrade_id(kind, tier)
-			if upgrades.has(id):
-				continue
-			out.append(id)
+			if is_branch_tier(tier):
+				for side in ["deep", "broad"]:
+					var bid := branch_id(kind, tier, side)
+					if upgrade_offered(bid):
+						out.append(bid)
+			else:
+				var uid := upgrade_id(kind, tier)
+				if not upgrades.has(uid):
+					out.append(uid)
 	return out
 
 
-## Cheapest offered upgrade, without allocating the full offered list - this
-## runs on the housekeeping tick and in the job planner.
+## Cheapest offered upgrade, without allocating the full list - this runs on the
+## housekeeping tick and in the job planner.
 func _next_upgrade() -> String:
 	var best := ""
 	var best_cost := INF
@@ -2106,31 +2453,19 @@ func _next_upgrade() -> String:
 		var made := float(job_lifetime.get(job_id, 0.0))
 		for tier in Balance.UPGRADE_TIERS.size():
 			if made < float(Balance.UPGRADE_TIERS[tier]["output"]):
-				break # tiers are ordered, so nothing beyond this is unlocked
-			var id := upgrade_id(kind, tier)
-			if upgrades.has(id):
-				continue
+				break
 			var c := float(Balance.UPGRADE_TIERS[tier]["cost"])
-			if c < best_cost:
+			if c >= best_cost:
+				continue
+			if is_branch_tier(tier):
+				# A branch is a decision, so the autopilot leaves it alone - and
+				# it is not "the next upgrade" for the purposes of buying either.
+				continue
+			var uid := upgrade_id(kind, tier)
+			if not upgrades.has(uid):
 				best_cost = c
-				best = id
+				best = uid
 	return best
-
-
-## Unlocked by headcount and not yet bought.
-func upgrade_offered(id: String) -> bool:
-	if upgrades.has(id):
-		return false
-	var parts := id.rsplit("_", true, 1)
-	if parts.size() != 2:
-		return false
-	var tier := int(parts[1])
-	if tier < 0 or tier >= Balance.UPGRADE_TIERS.size():
-		return false
-	var job_id := upgrade_job(id)
-	if job_id == "" or not job_unlocked(job_id):
-		return false
-	return float(job_lifetime.get(job_id, 0.0)) >= float(Balance.UPGRADE_TIERS[tier]["output"])
 
 
 func buy_upgrade(id: String) -> bool:
@@ -2143,8 +2478,7 @@ func buy_upgrade(id: String) -> bool:
 	upgrades.append(id)
 	_mods_dirty = true
 	_rebuild_mods()
-	add_log("%s. %s work twice as well now." % [upgrade_name(id),
-			Balance.JOBS[upgrade_job(id)]["name"]], "tech")
+	add_log("%s. %s" % [upgrade_name(id), upgrade_effect_text(id)], "tech")
 	upgrade_bought.emit(id)
 	state_changed.emit()
 	return true
@@ -2195,7 +2529,15 @@ func _rebuild_mods() -> void:
 	_birth_mult = 1.0
 	_housing_mult = 1.0
 	_territory_bonus = 0.0
-	_legacy_mult = 1.0 + legacy_points * Balance.LEGACY_BONUS_PER_POINT
+	_legacy_mult = 1.0 + Profile.legacy_points * Balance.LEGACY_BONUS_PER_POINT
+	# Permanent unlocks bought with Legacy, applied before anything else.
+	if Profile.has_perk("long_memory"):
+		_knowledge_mult *= 1.6
+	if Profile.has_perk("deep_roots"):
+		_birth_mult *= 1.4
+		_housing_mult *= 1.25
+	if Profile.has_perk("prospectors"):
+		_yield_mult["ore"] = float(_yield_mult.get("ore", 1.0)) * 1.5
 	if _endowed:
 		_knowledge_mult *= 1.30
 	if day < _mine_bonus_days:
@@ -2208,8 +2550,17 @@ func _rebuild_mods() -> void:
 		if count > 0:
 			_apply_effects(Balance.BUILDINGS[id]["effects"], count)
 	for id in upgrades:
-		var kind := id.rsplit("_", true, 1)[0]
-		_yield_mult[kind] = float(_yield_mult.get(kind, 1.0)) * Balance.UPGRADE_MULT
+		var parts := upgrade_parts(id)
+		var kind: String = parts[0]
+		var side: String = parts[2]
+		if side == "":
+			_yield_mult[kind] = float(_yield_mult.get(kind, 1.0)) * Balance.UPGRADE_MULT
+			continue
+		var spec: Dictionary = Balance.BRANCH_DEEP if side == "deep" else Balance.BRANCH_BROAD
+		_yield_mult[kind] = float(_yield_mult.get(kind, 1.0)) * float(spec["self"])
+		var partner: String = Balance.BRANCH_PARTNER.get(kind, "")
+		if partner != "":
+			_yield_mult[partner] = float(_yield_mult.get(partner, 1.0)) * float(spec["other"])
 
 	# Spoilage is a product of fractions and would otherwise reach zero with
 	# enough granaries. Food should always be perishable, just less so.
@@ -2306,6 +2657,8 @@ func _check_era() -> void:
 	if techs.size() >= int(e["techs"]) and population >= float(e["pop"]):
 		era = next
 		add_log("Your people are now a %s." % e["name"], "era")
+		_chronicle("The settlement becomes a %s." % e["name"], "era")
+		_add_notable("era", "They were there when it became a %s." % e["name"])
 		era_advanced.emit(era)
 
 
@@ -2421,7 +2774,7 @@ func to_dict() -> Dictionary:
 		"day": day,
 		"population": population,
 		"peak_population": peak_population,
-		"legacy_points": legacy_points,
+		"Profile.legacy_points": Profile.legacy_points,
 		"lifetime_output": lifetime_output,
 		"boon_id": boon_id,
 		"boon_tile": boon_tile,
@@ -2439,6 +2792,13 @@ func to_dict() -> Dictionary:
 		"festival_until": festival_until,
 		"festival_cooldown": festival_cooldown,
 		"outposts": outposts.duplicate(true),
+		"season": season,
+		"beat": beat,
+		"trade_sell": trade_sell,
+		"trade_buy": trade_buy,
+		"hunger_days": hunger_days,
+		"chronicle": chronicle.duplicate(true),
+		"notables": notables.duplicate(true),
 		"mine_bonus_days": _mine_bonus_days,
 		"endowed": _endowed,
 		"era": era,
@@ -2470,7 +2830,7 @@ func from_dict(d: Dictionary) -> void:
 	day = float(d.get("day", 0.0))
 	population = float(d.get("population", 6.0))
 	peak_population = maxf(population, float(d.get("peak_population", population)))
-	legacy_points = float(d.get("legacy_points", 0.0))
+	Profile.legacy_points = float(d.get("Profile.legacy_points", 0.0))
 	lifetime_output = float(d.get("lifetime_output", 0.0))
 	boon_id = String(d.get("boon_id", ""))
 	boon_tile = int(d.get("boon_tile", -1))
@@ -2487,6 +2847,19 @@ func from_dict(d: Dictionary) -> void:
 	momentum_until = float(d.get("momentum_until", -1.0))
 	festival_until = float(d.get("festival_until", -1.0))
 	festival_cooldown = float(d.get("festival_cooldown", 0.0))
+	season = int(d.get("season", 0))
+	beat = int(d.get("beat", 0))
+	trade_sell = String(d.get("trade_sell", ""))
+	trade_buy = String(d.get("trade_buy", ""))
+	hunger_days = float(d.get("hunger_days", 0.0))
+	chronicle.clear()
+	for c in d.get("chronicle", []):
+		if c is Dictionary:
+			chronicle.append(c)
+	notables.clear()
+	for n in d.get("notables", []):
+		if n is Dictionary:
+			notables.append(n)
 	_mine_bonus_days = float(d.get("mine_bonus_days", -1.0))
 	_endowed = bool(d.get("endowed", false))
 	outposts.clear()
