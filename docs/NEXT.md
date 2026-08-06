@@ -11,7 +11,7 @@ Measured headless on one core, a 2,400-person Iron Age city on a 96x64 world:
 
 | | measured |
 | --- | --- |
-| Simulation throughput | **49 sim-days/sec** (incl. world gen and a save/load test) |
+| Simulation throughput | **~45 sim-days/sec** (incl. world gen, save/load, prestige and baseline tests) |
 | Needed at 1x speed | 0.5 days/sec |
 | Needed at 4x speed | 2.0 days/sec |
 | **Headroom at 4x** | **~25x** |
@@ -73,93 +73,75 @@ If you want one number to watch: keep the harness above **~10 sim-days/sec**.
 That is 5x the 4x-speed requirement, which leaves room for the slowest machine
 you care about.
 
-## Gameplay
+## What has been built
 
-**A prestige layer is the biggest missing piece.** Cookie Clicker's ascension is
-what turns "I hit a wall" into "I start again faster", and this game has the
-perfect fiction for it: your civilisation ends, and the next one begins knowing
-what this one learned. Carry over a fraction of lifetime output as a permanent
-multiplier — call it Legacy, or the songs they still sing about you. It is
-maybe 150 lines on top of what already exists, because `job_lifetime` is already
-tracked and `_rebuild_mods` is already the one place multipliers are applied.
+Everything the previous pass recommended is now in. Kept here as a record of
+what each one actually cost and what it changed.
 
-**Golden-cookie equivalents.** Cookie Clicker's biggest retention trick is the
-rare click-for-a-big-bonus. The honest version here is a caravan, a good omen, a
-migrating herd — something that appears on the map for twenty seconds and pays
-out if you notice. It rewards watching without punishing not watching, which is
-exactly the contract an idle game makes.
+**Legacy (prestige).** Set a civilisation down and the next one starts knowing
+what it learned. Earned from lifetime output with a 0.55 exponent, so a better
+run is clearly better and no single run ends the game. A first ascension around
+day 700 is worth roughly +75% to every trade. An earlier tuning gave +900%,
+which made the second run a formality - the divisor is the dial.
 
-**The eras want more to do at the top.** Five eras is enough to prove the arc.
-The economy now scales forever but the *content* stops at Steel. More eras are
-pure data in `Balance.gd` — no simulation work.
+**Boons.** A caravan, a good omen, a migrating herd, a wandering scholar. Rare,
+brief, visible on the map, clickable where they stand. Every one is a bonus and
+none is a penalty, so noticing is rewarded and not noticing costs nothing.
 
-**Exploration should pay off more.** Right now it gates territory and turns up
-the occasional cache. Ruins that grant a tech, other peoples to trade with, or a
-second settlement site would make explorers the interesting choice they deserve
-to be.
+**Twelve more techs and three more eras**, through Classical, Sail and
+Industrial Dawn, plus tenements, workshop rows and universities to live in them.
+The first attempt priced them so the whole tree finished by day 500 - late tech
+costs now run to ~950k and spread across the arc.
 
-**Disasters need a difficulty dial** rather than one switch. "Rare / Normal /
-Harsh" costs nothing and makes the toggle a real setting.
+**Ruins on the frontier**, which occasionally hand over a whole idea at once.
 
-## Interface
+**Disaster frequency** is Off / Rare / Normal / Harsh rather than one switch.
 
-**The left column is doing too much.** Stores, people, land and workshops are
-four different questions in one scrolling strip. Consider a single "state of the
-settlement" summary line at the top and put the detail behind a tab.
+**Sparklines** for population, food, herd health and lifetime output - the
+shape of the last 360 days, one `draw_polyline` each, redrawn only when the
+data moves.
 
-**Nothing shows history.** An idle game lives on the shape of the curve, and
-the game currently only shows the current value. A sparkline of population,
-food and the herd over the last few hundred days would be the single highest
-value-per-pixel addition — and the data is cheap to keep (one sample a day in a
-ring buffer is 1,440 floats an hour).
+**A summary line and a plan line.** One sentence on how it is going, and one on
+why the workforce looks the way it does. The second matters more than it
+sounds: an automation you cannot interrogate is one you will not leave running.
 
-**Rates should be attributable.** "+754 wood/day" is good; "+754 (612 woodlots,
-142 wild)" is much better, and it is the information a player needs to decide
-what to build next.
+**Attributable rates.** Hovering a store says where the number comes from -
+"612 foresters, 142 woodcutters" - and what is being consumed against it.
 
-**The build tab does not say what a thing is worth.** It says what a Woodlot
-costs but not that it will add ~2 wood/day. Show the marginal effect and the
-payback time — that is the core decision of the genre.
+**Build orders state their case.** Every card says what one more does and how
+many days it takes to pay for itself, computed by valuing cost and gain in one
+currency.
 
-**Number formatting will need scientific notation** past about 1e15.
-`Balance.fmt` currently stops at trillions.
+**A CSV recorder** behind a setting: one row per in-game day, every resource,
+rate and job. Balance arguments get settled with a spreadsheet.
 
-## Playtest logging
+**A +100 days button** while the verbose log is on, so a designer does not wait
+an hour to see an hour of consequences.
 
-The event log is prose for the player, not data for you. Worth adding:
+**A baseline regression test** in CI, plus a prestige test. A silent balance
+change now breaks the build.
 
-- **A CSV recorder** behind the verbose-log setting: one row per in-game day
-  with population, every resource, every job count and the derived rates. Then
-  balance arguments get settled with a spreadsheet instead of opinions.
-- **A "why" probe** on the labour planner. It makes a non-obvious decision every
-  half-day and there is currently no way to ask it why. Logging the target,
-  the realised yields and the resulting split — behind a flag — would have found
-  the 937-woodcutter bug in a minute rather than a run.
-- **Deterministic seeded runs in CI with a recorded baseline**, failing when
-  population at day 500 moves more than ~15%. That turns silent balance
-  regressions into build failures.
-- **A fast-forward button in-game** (100x for ten seconds) so a designer can see
-  an hour of consequences without waiting an hour.
+**Smarter autopilot.** It looks ahead at what it actually intends to build
+rather than the priciest thing in the catalogue; it ranks trades by marginal
+value in one currency instead of a fixed order; and spare hands go to the
+slot-based trades - farms, woodlots, mines, quarries - rather than piling onto
+a wild stock that cannot give up any more.
 
-## Smarter autopilot
+## Still worth doing
 
-The labour planner is need-driven and reactive. Three upgrades, in order:
+**Art and audio** remain the biggest visible gap. Everything is primitives.
 
-1. **Look ahead instead of at the current shortfall.** It currently fills a gap
-   over ten days. It should notice that a Granary is queued and start
-   stockpiling stone *before* the order is placed.
-2. **Compare marginal value across trades in one currency.** Right now food is
-   sized against need, materials against stock targets, and knowledge gets the
-   leftovers. A single "what does one more worker here get me" score, in
-   comparable units, would let it make genuinely optimal calls — and it would
-   have avoided both saturation bugs by construction.
-3. **Make the autopilot legible.** Show its current reasoning in one line — "37
-   on food because the larder is thin, 12 on timber because a Longhouse is
-   queued". A player who understands the automation trusts it, and a player who
-   trusts it is happy to leave it running, which is the entire point.
+**More boon types**, and a reason to be watching at a particular moment.
 
-One caution: the automation is now good enough that a player who never touches
-it does fine. That is the right default and a design risk — if the optimum is
-"leave it alone", the management layer is decoration. The fix is not to make the
-autopilot worse. It is to give the player decisions the autopilot cannot make:
-where to settle next, which era to rush, what to do with a windfall.
+**Something the autopilot cannot decide.** The automation is now good enough
+that a player who never touches it does fine. That is the right default and a
+standing design risk: if the optimum is "leave it alone", the management layer
+is decoration. The answer is not to make the autopilot worse - it is to give
+the player choices it cannot make. Where to found a second settlement. Which
+era to rush. What to spend a windfall on. None of those exist yet.
+
+**A second settlement** is the obvious next system, and the one the map is
+already carrying the data for.
+
+**Trade with other peoples** the explorers find, which would give gold a
+purpose beyond the Treasury.

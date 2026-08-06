@@ -50,6 +50,12 @@ var _known_jobs: Array[String] = []
 var _known_buildings: Array[String] = []
 var _known_upgrades: Array[String] = []
 var _queue_signature := ""
+var _summary: Label
+var _plan_label: Label
+var _boon_button: Button
+var _legacy_button: Button
+var _surge_button: Button
+var _sparks := {}
 
 
 func _ready() -> void:
@@ -76,6 +82,16 @@ func _ready() -> void:
 	margin.add_child(root)
 
 	root.add_child(_build_top_bar())
+
+	# One line that answers "how is it going" without reading four panels.
+	var sum_panel := _panel()
+	_summary = _text("", 13, TEXT)
+	_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sum_panel.add_child(_summary)
+	_plan_label = _text("", 11, MUTED)
+	_plan_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sum_panel.add_child(_plan_label)
+	root.add_child(_panel_of(sum_panel))
 
 	var middle := HBoxContainer.new()
 	middle.add_theme_constant_override("separation", 8)
@@ -238,6 +254,30 @@ func _build_top_bar() -> Control:
 		row.add_child(b)
 		_speed_buttons.append(b)
 
+	# Appears only when there is something on the map worth going to look at.
+	_boon_button = Button.new()
+	_boon_button.visible = false
+	_boon_button.pressed.connect(func() -> void:
+		Sim.collect_boon()
+		_dirty = true)
+	row.add_child(_boon_button)
+
+	_legacy_button = Button.new()
+	_legacy_button.text = "Legacy"
+	_legacy_button.visible = false
+	_legacy_button.pressed.connect(_open_legacy)
+	row.add_child(_legacy_button)
+
+	# A designer should not have to wait an hour to see an hour of consequences.
+	_surge_button = Button.new()
+	_surge_button.text = "+100d"
+	_surge_button.tooltip_text = "Run a hundred days immediately. Shown while the verbose log is on."
+	_surge_button.visible = false
+	_surge_button.pressed.connect(func() -> void:
+		Sim.surge(100.0)
+		_dirty = true)
+	row.add_child(_surge_button)
+
 	var settings_btn := Button.new()
 	settings_btn.text = "Settings"
 	settings_btn.pressed.connect(_open_settings)
@@ -284,6 +324,19 @@ func _build_left_column() -> Control:
 		res.add_child(row)
 		_resource_rows[id] = {"name": name_label, "amount": amount, "rate": rate}
 	col.add_child(_panel_of(res))
+
+	var hist := _panel()
+	hist.add_child(_heading("HISTORY"))
+	for spec in [["pop", "People", ACCENT], ["food", "Food", Color("d9a441")],
+			["herd", "Wild herds", Color("d98555")], ["output", "Total ever made", GOOD]]:
+		hist.add_child(_text(String(spec[1]), 11, MUTED))
+		var spark := Sparkline.new()
+		spark.color = spec[2]
+		spark.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		hist.add_child(spark)
+		_sparks[spec[0]] = spark
+	hist.add_child(_text("last %d days" % Balance.HISTORY_SAMPLES, 10, MUTED))
+	col.add_child(_panel_of(hist))
 
 	var vit := _panel()
 	vit.add_child(_heading("THE PEOPLE"))
@@ -345,6 +398,9 @@ func _build_center_column() -> Control:
 	whole.pressed.connect(func() -> void: _map.view_world())
 	bar.add_child(whole)
 	bar.add_child(_text("scroll to zoom, drag to pan", 11, MUTED))
+	var spacer2 := Control.new()
+	spacer2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar.add_child(spacer2)
 	outer.add_child(bar)
 	return outer
 
@@ -534,6 +590,10 @@ func _rebuild_buildings() -> void:
 		v.add_child(head)
 
 		v.add_child(_wrapped(b["desc"]))
+		var gain_label := _text("", 12, GOOD)
+		gain_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		gain_label.custom_minimum_size.x = 300
+		v.add_child(gain_label)
 		var cost_label := _text("", 12, MUTED)
 		cost_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		cost_label.custom_minimum_size.x = 300
@@ -549,6 +609,7 @@ func _rebuild_buildings() -> void:
 		box.set_meta("owned", owned)
 		box.set_meta("btn", btn)
 		box.set_meta("cost", cost_label)
+		box.set_meta("gain", gain_label)
 		_build_list.add_child(box)
 
 
@@ -615,6 +676,7 @@ func _cost_text(cost: Dictionary) -> String:
 # --- Refresh ----------------------------------------------------------------
 
 func _refresh() -> void:
+	_refresh_summary()
 	_refresh_top()
 	_refresh_resources()
 	_refresh_vitals()
@@ -622,6 +684,44 @@ func _refresh() -> void:
 	_refresh_buildings()
 	_refresh_upgrades()
 	_refresh_research()
+
+
+func _refresh_summary() -> void:
+	var world := Sim.world
+	var trend := "growing" if Sim.births_per_day > Sim.deaths_per_day else "holding steady"
+	if Sim.food_satisfaction < 0.9:
+		trend = "hungry"
+	elif Sim.water_satisfaction < 0.9:
+		trend = "short of water"
+	var bits: Array[String] = []
+	bits.append("%s people and %s" % [Balance.fmt_count(Sim.population), trend])
+	bits.append("land supports %s" % Balance.fmt_count(Sim.carrying_capacity))
+	if world != null:
+		bits.append("%d%% of the world mapped" % int(world.explored_fraction() * 100.0))
+	bits.append("%d techs, %d upgrades" % [Sim.techs.size(), Sim.upgrades.size()])
+	if Sim.legacy_points > 0.0:
+		bits.append("%s Legacy (+%d%% to everything)" % [Balance.fmt(Sim.legacy_points),
+				int(round(Sim.legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0))])
+	if Sim.omen_active():
+		bits.append("[omen: everything doubled]")
+	_summary.text = "  -  ".join(bits)
+	_plan_label.text = Sim.plan_reason if Sim.auto_assign else "Work assigned by hand."
+
+	for key in _sparks:
+		(_sparks[key] as Sparkline).set_values(Sim.history.get(key, PackedFloat32Array()))
+
+	if Sim.boon_id != "":
+		var b: Dictionary = Balance.BOONS[Sim.boon_id]
+		_boon_button.text = String(b["name"])
+		_boon_button.add_theme_color_override("font_color", b["color"])
+		_boon_button.visible = true
+	else:
+		_boon_button.visible = false
+
+	_legacy_button.visible = Sim.can_ascend()
+	if _legacy_button.visible:
+		_legacy_button.text = "Legacy +%s" % Balance.fmt(Sim.legacy_on_offer())
+	_surge_button.visible = Settings.verbose_log
 
 
 func _refresh_top() -> void:
@@ -651,6 +751,17 @@ func _refresh_resources() -> void:
 		var rate: float = Sim.rates.get(id, 0.0)
 		row["rate"].text = Balance.fmt_rate(rate) + "/d"
 		row["rate"].add_theme_color_override("font_color", GOOD if rate >= 0.0 else BAD)
+		# Where the number comes from, which is what you need to decide what to
+		# build next.
+		var from := Sim.rate_breakdown(id)
+		var tip := "%s: %s" % [Balance.RESOURCES[id]["name"], from] if from != "" else ""
+		if id == "food" and Sim.population > 0.0:
+			tip += "\neaten: %s/day" % Balance.fmt(Sim.population * Balance.FOOD_PER_PERSON_PER_DAY)
+		elif id == "water" and Sim.population > 0.0:
+			tip += "\ndrunk: %s/day" % Balance.fmt(Sim.population * Balance.WATER_PER_PERSON_PER_DAY)
+		row["amount"].tooltip_text = tip
+		row["rate"].tooltip_text = tip
+		row["name"].tooltip_text = tip
 
 
 func _refresh_vitals() -> void:
@@ -765,6 +876,12 @@ func _refresh_buildings() -> void:
 		var have: int = Sim.buildings.get(id, 0)
 		owned.text = "%d" % have if cap <= 0 else "%d / %d" % [have, cap]
 		(box.get_meta("cost") as Label).text = _cost_text(Sim.cost_of(id))
+		var gain: Label = box.get_meta("gain")
+		var effect := Sim.building_effect_text(id)
+		var payback := Sim.building_payback_days(id)
+		if payback > 0.0:
+			effect += "  -  pays for itself in %s days" % Balance.fmt(payback, 1)
+		gain.text = effect
 		(box.get_meta("btn") as Button).disabled = not Sim.can_build(id)
 
 	# The queue is rebuilt only when it actually changes - it used to be torn
@@ -934,6 +1051,51 @@ func _open_new_world() -> void:
 	dlg.popup_centered()
 
 
+# --- Legacy -----------------------------------------------------------------
+
+func _open_legacy() -> void:
+	var dlg := AcceptDialog.new()
+	dlg.title = "Legacy"
+	dlg.ok_button_text = "Set them down"
+	dlg.add_cancel_button("Not yet")
+	dlg.min_size = Vector2i(520, 340)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	dlg.add_child(v)
+
+	var offer := Sim.legacy_on_offer()
+	v.add_child(_text("End this civilisation?", 16, ACCENT))
+	var body := _wrapped("Everything standing here is lost - the buildings, the fields, the "
+			+ "people, the map. What survives is what they worked out, and the songs about "
+			+ "them, and the next lot start knowing it.", 13, TEXT)
+	body.custom_minimum_size.x = 470
+	v.add_child(body)
+
+	v.add_child(_text("You would carry forward %s Legacy." % Balance.fmt(offer), 15, GOOD))
+	var total := Sim.legacy_points + offer
+	v.add_child(_text("Total afterwards: %s, which is +%d%% to every trade, for ever."
+			% [Balance.fmt(total), int(round(total * Balance.LEGACY_BONUS_PER_POINT * 100.0))],
+			13, MUTED))
+
+	var row := HBoxContainer.new()
+	row.add_child(_text("Next world", 13, MUTED))
+	var picker := OptionButton.new()
+	for i in Balance.WORLD_TYPES.size():
+		picker.add_item(String(Balance.WORLD_TYPES[i]["name"]), i)
+	picker.selected = Sim.world.world_type if Sim.world != null else 0
+	row.add_child(picker)
+	v.add_child(row)
+
+	dlg.confirmed.connect(func() -> void:
+		Sim.ascend(picker.get_selected_id())
+		SaveSystem.save_game()
+		_map.view_home())
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered()
+
+
 # --- Settings ---------------------------------------------------------------
 
 func _open_settings() -> void:
@@ -990,11 +1152,23 @@ func _open_settings() -> void:
 			func(on: bool) -> void: Settings.high_contrast = on))
 
 	v.add_child(_heading("GAME"))
-	v.add_child(_toggle("Natural disasters", Settings.disasters,
-			"Forest fires, floods, hurricanes and tornados. Off by default. They cost you a season, never the settlement.",
-			func(on: bool) -> void: Settings.disasters = on))
-	v.add_child(_wrapped("Fires, floods, hurricanes and tornados. Setbacks only - the "
-			+ "never-lose floor still holds underneath them."))
+	var dis_row := HBoxContainer.new()
+	var dis_label := _text("Natural disasters", 13, TEXT)
+	dis_label.custom_minimum_size.x = 200
+	dis_row.add_child(dis_label)
+	var dis_pick := OptionButton.new()
+	for i in Balance.DISASTER_FREQUENCY.size():
+		dis_pick.add_item(String(Balance.DISASTER_FREQUENCY[i]["name"]), i)
+	dis_pick.selected = clampi(Settings.disaster_frequency, 0, Balance.DISASTER_FREQUENCY.size() - 1)
+	dis_pick.item_selected.connect(func(i: int) -> void: Settings.disaster_frequency = i)
+	dis_row.add_child(dis_pick)
+	v.add_child(dis_row)
+	v.add_child(_wrapped("Forest fires, floods, hurricanes and tornados. Off by default. "
+			+ "Setbacks only - the never-lose floor still holds underneath them."))
+	v.add_child(_toggle("Write a CSV of every day", Settings.csv_logging,
+			"One row per in-game day to user://civamation_log.csv - population, every resource, "
+			+ "every job. For settling balance arguments with a spreadsheet.",
+			func(on: bool) -> void: Settings.csv_logging = on))
 	v.add_child(_slider_row("Autosave every (seconds)", Settings.autosave_seconds, 5.0, 120.0, 5.0,
 			func(x: float) -> void: Settings.autosave_seconds = x))
 	v.add_child(_toggle("Warn before abandoning a world", Settings.confirm_new_world, "",

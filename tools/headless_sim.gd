@@ -30,6 +30,8 @@ func _ready() -> void:
 		_run_seed(s * 1337, days, (s - 1) % Balance.WORLD_TYPES.size())
 
 	_test_save_load()
+	_test_legacy()
+	_test_baseline()
 
 	print("")
 	if _failures.is_empty():
@@ -185,6 +187,58 @@ func _test_save_load() -> void:
 	print("day %.0f, pop %.0f, %d techs, %d fields compared, %d mismatched"
 			% [Sim.day, Sim.population, Sim.techs.size(), before.size(), mismatches])
 	SaveSystem.delete_save()
+
+
+## Prestige has to actually carry forward, and the next run has to start
+## measurably better - otherwise the whole layer is decoration.
+func _test_legacy() -> void:
+	print("")
+	print("=== legacy ===")
+	Sim.new_game(4242, Balance.WorldType.CONTINENTS)
+	Sim.simulate_days(700.0, true)
+	var offer := Sim.legacy_on_offer()
+	var pop_before := Sim.population
+	if offer < Balance.LEGACY_MIN_POINTS:
+		_failures.append("legacy: 700 days earned only %.1f points" % offer)
+		return
+	if not Sim.ascend(Balance.WorldType.EARTH):
+		_failures.append("legacy: ascend refused with %.1f points on offer" % offer)
+		return
+	if not is_equal_approx(Sim.legacy_points, offer):
+		_failures.append("legacy: carried %.2f forward, expected %.2f" % [Sim.legacy_points, offer])
+	if Sim.day > 1.0 or Sim.population > 10.0:
+		_failures.append("legacy: the new world did not actually start over")
+	Sim.simulate_days(300.0, true)
+	print("banked %.0f points; %.0f people before, %.0f in the next run's first 300 days"
+			% [Sim.legacy_points, pop_before, Sim.population])
+	if Sim.population < 20.0:
+		_failures.append("legacy: the run after ascending stalled at %.0f" % Sim.population)
+
+
+## A silent balance regression should break the build, not be discovered in
+## play three weeks later. Wide tolerances - this catches things falling over,
+## not honest tuning.
+const BASELINE := {"day": 500.0, "pop_min": 300.0, "pop_max": 4000.0,
+	"techs_min": 18, "explored_min": 0.25}
+
+
+func _test_baseline() -> void:
+	print("")
+	print("=== baseline (seed 1337, Earth, day %d) ===" % int(BASELINE["day"]))
+	Sim.new_game(1337, Balance.WorldType.EARTH)
+	Sim.simulate_days(float(BASELINE["day"]), true)
+	print("pop %s, %d techs, %d upgrades, %.0f%% mapped, era %d"
+			% [Balance.fmt_count(Sim.population), Sim.techs.size(), Sim.upgrades.size(),
+			Sim.world.explored_fraction() * 100.0, Sim.era])
+	if Sim.population < float(BASELINE["pop_min"]) or Sim.population > float(BASELINE["pop_max"]):
+		_failures.append("baseline: population %.0f outside %.0f-%.0f"
+				% [Sim.population, float(BASELINE["pop_min"]), float(BASELINE["pop_max"])])
+	if Sim.techs.size() < int(BASELINE["techs_min"]):
+		_failures.append("baseline: only %d techs by day %d"
+				% [Sim.techs.size(), int(BASELINE["day"])])
+	if Sim.world.explored_fraction() < float(BASELINE["explored_min"]):
+		_failures.append("baseline: only %.0f%% mapped"
+				% (Sim.world.explored_fraction() * 100.0))
 
 
 func _report() -> void:

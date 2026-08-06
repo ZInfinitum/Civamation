@@ -23,6 +23,8 @@ signal upgrade_bought(id: String)
 signal building_completed(id: String)
 signal era_advanced(era: int)
 signal game_reset
+signal boon_appeared(id: String)
+signal ascended(points: float)
 
 var world: CivWorld
 
@@ -57,6 +59,26 @@ var upgrades: Array[String] = []
 var researching: String = ""
 
 var era: int = 0
+
+# --- Legacy (prestige) ---
+## Banked across runs. Every point is a flat percentage on every trade, for ever.
+var legacy_points: float = 0.0
+## Everything this civilisation has ever produced, which is what Legacy is
+## earned from. Summed across trades - it is a score, not a quantity.
+var lifetime_output: float = 0.0
+
+# --- Boons ---
+var boon_id := ""
+var boon_tile: int = -1
+var boon_expires: float = 0.0
+
+## One sample a day of the things worth seeing the shape of.
+var history := {}
+## Gross output per job last step, for attributing a rate to its sources.
+var gross_by_job := {}
+## One line explaining the labour planner's last decision. An automation you
+## cannot interrogate is one you cannot trust.
+var plan_reason := ""
 var log_entries: Array[Dictionary] = []
 
 # Cached readouts the UI wants but should not recompute.
@@ -98,6 +120,10 @@ var _total_forest := 0.0
 var _stock_targets := {}
 ## Last pass's assignment, so saturation can be judged against a real crew.
 var _prev_jobs := {}
+var _legacy_mult := 1.0
+var _omen_until: float = -1.0
+var _boon_cooldown: float = Balance.BOON_INTERVAL_DAYS
+var _csv: FileAccess = null
 var _explore_progress := 0.0
 var _seen_biomes: Array[int] = []
 var _milestone := 0
@@ -137,6 +163,15 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_explore_progress = 0.0
 	_seen_biomes.clear()
 	_milestone = 0
+	lifetime_output = 0.0
+	boon_id = ""
+	boon_tile = -1
+	_omen_until = -1.0
+	_boon_cooldown = Balance.BOON_INTERVAL_DAYS
+	plan_reason = ""
+	history = {}
+	for series in Balance.HISTORY_SERIES:
+		history[series] = PackedFloat32Array()
 
 	resources = {}
 	rates = {}
@@ -260,7 +295,9 @@ func _step(dt: float, offline: bool = false) -> void:
 	_apply_storage(dt)
 	if not offline:
 		_maybe_event(dt)
-	if Settings.disasters:
+	if not offline:
+		_maybe_boon(dt)
+	if Settings.disaster_frequency > 0:
 		_maybe_disaster(dt, offline)
 	_check_era()
 	_check_milestones(offline)
@@ -329,6 +366,18 @@ func _on_revealed(i: int, offline: bool) -> void:
 
 	if offline:
 		return
+	# Somebody was here first. The rarest thing the frontier turns up, and the
+	# only one that can hand you a whole idea at once.
+	if randf() < 0.004 and _seen_biomes.size() > 2:
+		var target := researching if researching != "" else _cheapest_available()
+		if target != "" and randf() < 0.35:
+			resources["knowledge"] += float(Balance.TECHS[target]["cost"])
+			add_log("Ruins. Someone was here long before you, and left enough behind "
+					+ "to finish a thought your elders had started.", "tech")
+		else:
+			resources["knowledge"] += 40.0 + population * 0.8
+			add_log("Ruins on the frontier - old walls, and marks nobody can read.", "tech")
+		return
 	if world.gold[i] > 0.30:
 		resources["gold"] += 6.0 + population * 0.05
 		add_log("Bright grains in a streambed out past the frontier.", "good")
@@ -339,7 +388,155 @@ func _on_revealed(i: int, offline: bool) -> void:
 
 ## Once-a-day upkeep of the things the map shows but the economy does not run
 ## on: where the animals are, and who can currently see what.
+## Legacy on offer if you set this civilisation down now.
+func legacy_on_offer() -> float:
+	if lifetime_output <= 0.0:
+		return 0.0
+	return floorf(pow(lifetime_output / Balance.LEGACY_DIVISOR, Balance.LEGACY_EXPONENT))
+
+
+func can_ascend() -> bool:
+	return legacy_on_offer() >= Balance.LEGACY_MIN_POINTS
+
+
+## End this civilisation and begin another, keeping what was learned. The only
+## action in the game that throws work away on purpose, and the only one that
+## makes the next run permanently better.
+func ascend(world_type: int = -1) -> bool:
+	if not can_ascend():
+		return false
+	var gained := legacy_on_offer()
+	var keep := legacy_points + gained
+	var shape := world.world_type if world_type < 0 else world_type
+	new_game(0, shape)
+	legacy_points = keep
+	_mods_dirty = true
+	_rebuild_mods()
+	add_log("The old country is behind you. %s Legacy carried forward - every trade "
+			% Balance.fmt(gained) + "begins %d%% better than it did before."
+			% int(round(legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0)), "era")
+	ascended.emit(gained)
+	state_changed.emit()
+	return true
+
+
+# --- Boons ------------------------------------------------------------------
+## Rare, brief, and visible on the map. Every one is a bonus and none is a
+## penalty, so noticing is rewarded and not noticing costs nothing.
+
+func _maybe_boon(dt: float) -> void:
+	if boon_id != "":
+		if day > boon_expires:
+			boon_id = ""
+			boon_tile = -1
+			state_changed.emit()
+		return
+	_boon_cooldown -= dt
+	if _boon_cooldown > 0.0:
+		return
+	_boon_cooldown = Balance.BOON_INTERVAL_DAYS * randf_range(0.65, 1.45)
+	if world.territory.is_empty():
+		return
+	boon_id = Balance.BOON_ORDER[randi() % Balance.BOON_ORDER.size()]
+	boon_tile = world.territory[randi() % world.territory.size()]
+	boon_expires = day + Balance.BOON_LIFETIME_DAYS
+	add_log("%s. %s" % [Balance.BOONS[boon_id]["name"], Balance.BOONS[boon_id]["text"]], "good")
+	boon_appeared.emit(boon_id)
+	state_changed.emit()
+
+
+func collect_boon() -> bool:
+	if boon_id == "":
+		return false
+	var id := boon_id
+	boon_id = ""
+	boon_tile = -1
+	match id:
+		"caravan":
+			# Paid in proportion to what the settlement makes, so it stays
+			# meaningful at six people and at sixty thousand.
+			for res in ["food", "wood", "stone", "ore"]:
+				resources[res] += maxf(40.0, production[res] * 60.0)
+			resources["gold"] += maxf(10.0, production["gold"] * 90.0 + population * 0.2)
+			add_log("The caravan is met and traded with.", "good")
+		"good_omen":
+			_omen_until = day + Balance.OMEN_DAYS
+			add_log("The omen is read as a good one. For a month everyone works like it matters.", "good")
+		"migrating_herd":
+			for i in world.territory:
+				world.game[i] = world.game_cap[i]
+			add_log("The herd passes through. The valley is full of animals again.", "good")
+		"wandering_scholar":
+			resources["knowledge"] += maxf(60.0, production["knowledge"] * 120.0)
+			for k in 20:
+				world.reveal_one()
+			add_log("The scholar draws what they remember of the country beyond, and moves on.", "good")
+	state_changed.emit()
+	return true
+
+
+func omen_active() -> bool:
+	return day < _omen_until
+
+
+func _sample_history() -> void:
+	var vals := {
+		"pop": population,
+		"food": resources["food"],
+		"herd": world.stock_health(world.game, world.game_cap) * 100.0,
+		"output": lifetime_output,
+	}
+	for series in Balance.HISTORY_SERIES:
+		var arr: PackedFloat32Array = history.get(series, PackedFloat32Array())
+		arr.append(float(vals[series]))
+		if arr.size() > Balance.HISTORY_SAMPLES:
+			arr = arr.slice(arr.size() - Balance.HISTORY_SAMPLES)
+		history[series] = arr
+
+
+## One row per in-game day. Balance arguments should be settled with a
+## spreadsheet, not with opinions.
+func _write_csv_row() -> void:
+	if not Settings.csv_logging:
+		if _csv != null:
+			_csv.close()
+			_csv = null
+		return
+	if _csv == null:
+		_csv = FileAccess.open(Settings.CSV_PATH, FileAccess.WRITE)
+		if _csv == null:
+			return
+		var head := PackedStringArray(["day", "population", "carrying_capacity", "housing"])
+		for res in Balance.RESOURCE_ORDER:
+			head.append(res)
+			head.append(res + "_rate")
+		for job in Balance.JOB_ORDER:
+			head.append("job_" + job)
+		head.append_array(["techs", "upgrades", "era", "explored_pct", "territory", "legacy"])
+		_csv.store_line(",".join(head))
+	var row := PackedStringArray([str(int(day)), "%.2f" % population,
+			"%.2f" % carrying_capacity, "%.2f" % housing])
+	for res in Balance.RESOURCE_ORDER:
+		row.append("%.3f" % resources[res])
+		row.append("%.3f" % float(rates.get(res, 0.0)))
+	for job in Balance.JOB_ORDER:
+		row.append(str(int(jobs.get(job, 0))))
+	row.append_array([str(techs.size()), str(upgrades.size()), str(era),
+			"%.1f" % (world.explored_fraction() * 100.0), str(world.territory.size()),
+			"%.1f" % legacy_points])
+	_csv.store_line(",".join(row))
+
+
+## Run days immediately, for a designer who does not want to wait an hour to
+## see an hour of consequences.
+func surge(days: float) -> void:
+	simulate_days(days, false)
+	state_changed.emit()
+
+
 func _daily_world_tick() -> void:
+	_sample_history()
+	_write_csv_row()
 	if not Settings.reduce_motion:
 		world.step_animals(int(float(Balance.MAX_ANIMALS) / Balance.ANIMAL_MOVE_DAYS))
 	world.refresh_visibility(_scout_tiles(), 2)
@@ -369,7 +566,9 @@ func _maybe_disaster(dt: float, offline: bool) -> void:
 	_disaster_cooldown -= dt
 	if _disaster_cooldown > 0.0:
 		return
-	_disaster_cooldown = Balance.DISASTER_INTERVAL_DAYS * randf_range(0.6, 1.5)
+	var freq: Dictionary = Balance.DISASTER_FREQUENCY[clampi(Settings.disaster_frequency, 0,
+			Balance.DISASTER_FREQUENCY.size() - 1)]
+	_disaster_cooldown = Balance.DISASTER_INTERVAL_DAYS * float(freq["scale"]) * randf_range(0.6, 1.5)
 
 	var choices: Array[String] = []
 	for id in Balance.DISASTERS:
@@ -485,8 +684,13 @@ func _functional_response(stock: float, attack: float, handling: float) -> float
 	return attack * stock / (1.0 + attack * handling * stock)
 
 
+## Every yield passes through here, which is where the two global multipliers
+## live: what previous civilisations left you, and whatever the sky is doing.
 func _mult(kind: String) -> float:
-	return float(_yield_mult.get(kind, 1.0))
+	var m := float(_yield_mult.get(kind, 1.0)) * _legacy_mult
+	if day < _omen_until:
+		m *= Balance.OMEN_MULTIPLIER
+	return m
 
 
 func _tile_avg(total: float) -> float:
@@ -590,6 +794,7 @@ func _produce(dt: float) -> void:
 	for id in ["hunter", "forager", "woodcutter", "water_carrier", "farmer",
 			"forester", "quarrier", "miner", "thinker"]:
 		_track_yield(id, float(_last_gross.get(id, 0.0)), dt)
+	gross_by_job = _last_gross.duplicate()
 	_last_gross.clear()
 
 
@@ -786,6 +991,7 @@ func job_yield_planned(id: String) -> float:
 func _track_yield(id: String, gross: float, dt: float = 0.0) -> void:
 	if gross > 0.0 and dt > 0.0:
 		job_lifetime[id] = float(job_lifetime.get(id, 0.0)) + gross * dt
+		lifetime_output += gross * dt
 	var n: int = mini(int(jobs.get(id, 0)), job_capacity(id))
 	# With nobody assigned there is no evidence to learn from, so drift back
 	# toward the theoretical figure - otherwise a job once abandoned would look
@@ -802,17 +1008,45 @@ func _track_yield(id: String, gross: float, dt: float = 0.0) -> void:
 func _recompute_stock_targets() -> void:
 	for res in Balance.RESOURCE_ORDER:
 		_stock_targets[res] = Balance.STOCK_TARGET_FLOOR
-	for id in Balance.BUILDING_ORDER:
-		if not building_unlocked(id):
+	# Look ahead at what the settlement actually intends to build next, rather
+	# than at the priciest thing in the catalogue. Saving up for a Great Hall
+	# nobody wants yet keeps every pair of hands gathering for no reason.
+	var seen := {}
+	var considered := 0
+	for id in _build_priority():
+		if considered >= 6:
+			break
+		if seen.has(id) or not building_unlocked(id):
 			continue
 		var cap := building_max(id)
 		if cap > 0 and built_and_queued(id) >= cap:
 			continue
+		seen[id] = true
+		considered += 1
 		var cost := cost_of(id)
 		for res in cost:
 			var want := float(cost[res]) * Balance.STOCK_TARGET_MULTIPLE
 			if want > float(_stock_targets.get(res, 0.0)):
 				_stock_targets[res] = want
+
+
+## What one more worker in this job is worth, in one currency across all trades.
+##
+## Yield alone is not comparable - a miner and a forester produce different
+## things in different quantities. Multiplying by what the material is worth and
+## by how short of it the settlement currently is puts every trade on the same
+## scale, which is the only way to answer "who should the next person be?"
+func marginal_value(id: String) -> float:
+	var res := _job_resource(id)
+	var y := job_yield_planned(id)
+	if y <= 0.0:
+		return 0.0
+	var target: float = maxf(1.0, float(_stock_targets.get(res, Balance.STOCK_TARGET_FLOOR)))
+	var have: float = resources.get(res, 0.0)
+	# Scarcity: worth a great deal when the store is empty, little when it is
+	# nearly full, never quite nothing.
+	var scarcity := clampf(1.0 - have / target, 0.05, 1.0)
+	return y * float(Balance.RESOURCE_VALUE.get(res, 1.0)) * scarcity
 
 
 ## True when there is plainly enough of something, so nobody is sent to fetch
@@ -970,7 +1204,11 @@ func _auto_assign_jobs() -> void:
 	# evenly put nine hundred people on a forest that could not give up another
 	# stick - busy, and completely pointless.
 	if left > 0:
-		for id in ["forester", "woodcutter", "quarrier", "miner"]:
+		# Best value first, so the scarcest useful thing gets the people.
+		var trades: Array[String] = ["forester", "woodcutter", "quarrier", "miner"]
+		trades.sort_custom(func(a: String, c: String) -> bool:
+			return marginal_value(a) > marginal_value(c))
+		for id in trades:
 			if left <= 0:
 				break
 			if not job_unlocked(id) or _well_stocked(_job_resource(id)):
@@ -992,10 +1230,33 @@ func _auto_assign_jobs() -> void:
 			jobs[id] = int(jobs.get(id, 0)) + want
 			left -= want
 
-		# Knowledge is never full and never wasted while there is anything left
-		# to learn or buy, so it soaks up whoever is spare.
-		if left > 0 and job_unlocked("thinker") and (researching != ""
-				or _cheapest_available() != "" or _next_upgrade() != ""):
+		# Anyone still spare goes on production anyway, even where the stores are
+		# comfortable: upgrades unlock on lifetime output, so idle hands are the
+		# next doubling not happening. Only the slot-based trades though - farms,
+		# woodlots, mines and quarries all have somewhere to put another person,
+		# whereas the wild stocks are already worked as hard as they can bear.
+		if left > 0:
+			var spare: Array[String] = []
+			for id in ["farmer", "forester", "miner", "quarrier"]:
+				if job_unlocked(id) and job_capacity(id) > int(jobs.get(id, 0)):
+					spare.append(id)
+			spare.sort_custom(func(a: String, c: String) -> bool:
+				return marginal_value(a) > marginal_value(c))
+			for id in spare:
+				if left <= 0:
+					break
+				var room := job_capacity(id) - int(jobs.get(id, 0))
+				room = mini(room, maxi(0, _saturation_cap(id) - int(jobs.get(id, 0))))
+				# An even-ish share so one trade does not swallow everybody.
+				var take := clampi(int(ceil(float(left) / float(spare.size()))), 0, room)
+				take = mini(take, left)
+				jobs[id] = int(jobs.get(id, 0)) + take
+				left -= take
+
+		# And whatever is left over thinks. Knowledge is never full, and because
+		# upgrades unlock on output rather than headcount there is always another
+		# one coming, so this never becomes busy-work.
+		if left > 0 and job_unlocked("thinker"):
 			jobs["thinker"] = int(jobs.get("thinker", 0)) + left
 			left = 0
 
@@ -1012,8 +1273,168 @@ func _auto_assign_jobs() -> void:
 	for id in Balance.JOB_ORDER:
 		job_peak[id] = maxi(int(job_peak.get(id, 0)), int(jobs[id]))
 
+	_explain_plan(food_days, water_days)
+
+
+## One readable sentence about why the workforce looks the way it does. An
+## automation you cannot interrogate is one you cannot trust, and a player who
+## does not trust it will not leave it running - which is the whole game.
+func _explain_plan(food_days: float, water_days: float) -> void:
+	var parts: Array[String] = []
+	var n_food: int = int(jobs["hunter"]) + int(jobs["forager"]) + int(jobs["farmer"])
+	if n_food > 0:
+		var why := "keeping pace"
+		if food_days < 3.0:
+			why = "the larder is thin"
+		elif food_days > 12.0:
+			why = "well stocked, so fewer"
+		parts.append("%d on food (%s)" % [n_food, why])
+	if int(jobs["water_carrier"]) > 0:
+		parts.append("%d on water%s" % [int(jobs["water_carrier"]),
+				" (running low)" if water_days < 1.5 else ""])
+	if int(jobs["explorer"]) > 0:
+		parts.append("%d scouting%s" % [int(jobs["explorer"]),
+				" (land waiting to be claimed)" if expansion_blocked_by_exploration() else ""])
+	if int(jobs["builder"]) > 0 and not build_queue.is_empty():
+		parts.append("%d building the %s" % [int(jobs["builder"]),
+				Balance.BUILDINGS[build_queue[0]["id"]]["name"]])
+	for id in ["forester", "woodcutter", "quarrier", "miner"]:
+		if int(jobs[id]) > 0:
+			parts.append("%d on %s" % [int(jobs[id]), String(Balance.JOBS[id]["name"]).to_lower()])
+	if int(jobs["thinker"]) > 0:
+		parts.append("%d thinking" % int(jobs["thinker"]))
+	var idle := idle_workers()
+	if idle > 0:
+		parts.append("%d idle (nothing worth doing)" % idle)
+	plan_reason = ", ".join(parts) if not parts.is_empty() else "nobody assigned"
+
+
+## Which store a job actually fills, for display.
+func job_resource(id: String) -> String:
+	match String(Balance.JOBS[id]["kind"]):
+		"game", "forage", "farm": return "food"
+		"forest", "timber": return "wood"
+		"water": return "water"
+		"stone": return "stone"
+		"ore": return "ore"
+		"knowledge": return "knowledge"
+	return ""
+
+
+## Where a resource is coming from right now. "+754 wood/day" is fine; "612
+## from woodlots, 142 from the wild" is what a player needs to decide what to
+## build next.
+func rate_breakdown(res: String) -> String:
+	var parts: Array[String] = []
+	for job_id in Balance.JOB_ORDER:
+		if job_resource(job_id) != res:
+			continue
+		var g := float(gross_by_job.get(job_id, 0.0))
+		if g > 0.005:
+			parts.append("%s %s" % [Balance.fmt(g), String(Balance.JOBS[job_id]["name"]).to_lower()])
+	if res == "knowledge":
+		var ambient := Balance.AMBIENT_KNOWLEDGE * sqrt(maxf(population, 1.0)) * _knowledge_mult
+		if ambient > 0.005:
+			parts.append("%s ambient" % Balance.fmt(ambient))
+	if res == "hides":
+		var hide_rate := float(gross_by_job.get("hunter", 0.0)) * 0.22
+		if hide_rate > 0.005:
+			parts.append("%s from the hunt" % Balance.fmt(hide_rate))
+	return ", ".join(parts)
+
 
 # --- Building ---------------------------------------------------------------
+
+## Plain English for what one more of something does. The build list used to
+## say what a Woodlot costs and never what it was for.
+func building_effect_text(id: String) -> String:
+	var eff: Dictionary = Balance.BUILDINGS[id]["effects"]
+	var parts: Array[String] = []
+	for key in eff:
+		match key:
+			"housing":
+				parts.append("shelters %d more" % int(eff[key]))
+			"farm_plots":
+				parts.append("+%d farm plot%s (about %s food/day)" % [int(eff[key]),
+						"" if int(eff[key]) == 1 else "s",
+						Balance.fmt(float(eff[key]) * _farm_per_worker(), 2)])
+			"woodlot_slots":
+				parts.append("+%d woodlot%s (about %s wood/day)" % [int(eff[key]),
+						"" if int(eff[key]) == 1 else "s",
+						Balance.fmt(float(eff[key]) * _timber_per_worker(), 2)])
+			"mine_slots":
+				parts.append("+%d mine shaft%s (about %s ore/day)" % [int(eff[key]),
+						"" if int(eff[key]) == 1 else "s",
+						Balance.fmt(float(eff[key]) * _ore_per_worker(), 2)])
+			"quarry_slots":
+				parts.append("+%d quarry face%s (about %s stone/day)" % [int(eff[key]),
+						"" if int(eff[key]) == 1 else "s",
+						Balance.fmt(float(eff[key]) * _stone_per_worker(), 2)])
+			"yield_mult":
+				for kind in eff[key]:
+					parts.append("+%d%% %s" % [int(round((float(eff[key][kind]) - 1.0) * 100.0)),
+							_kind_label(kind)])
+			"knowledge_mult":
+				parts.append("+%d%% knowledge" % int(round((float(eff[key]) - 1.0) * 100.0)))
+			"spoilage_mult":
+				parts.append("-%d%% spoilage" % int(round((1.0 - float(eff[key])) * 100.0)))
+			"territory":
+				parts.append("+%s tiles of range" % Balance.fmt(float(eff[key]), 1))
+	return ", ".join(parts)
+
+
+func _kind_label(kind: String) -> String:
+	for job_id in Balance.JOB_ORDER:
+		if String(Balance.JOBS[job_id]["kind"]) == kind:
+			return String(Balance.JOBS[job_id]["name"]).to_lower()
+	return kind
+
+
+## Days for one more of these to pay for itself, comparing what it costs and
+## what it adds in the same currency. Returns -1 when the value is real but not
+## measurable this way - housing and range, mostly.
+func building_payback_days(id: String) -> float:
+	var cost := cost_of(id)
+	var spend := 0.0
+	for res in cost:
+		spend += float(cost[res]) * float(Balance.RESOURCE_VALUE.get(res, 1.0))
+	if spend <= 0.0:
+		return -1.0
+
+	var eff: Dictionary = Balance.BUILDINGS[id]["effects"]
+	var gain := 0.0
+	for key in eff:
+		match key:
+			"farm_plots":
+				gain += float(eff[key]) * _farm_per_worker() * float(Balance.RESOURCE_VALUE["food"])
+			"woodlot_slots":
+				gain += float(eff[key]) * _timber_per_worker() * float(Balance.RESOURCE_VALUE["wood"])
+			"mine_slots":
+				gain += float(eff[key]) * _ore_per_worker() * float(Balance.RESOURCE_VALUE["ore"])
+			"quarry_slots":
+				gain += float(eff[key]) * _stone_per_worker() * float(Balance.RESOURCE_VALUE["stone"])
+			"yield_mult":
+				for kind in eff[key]:
+					var res := _kind_resource(kind)
+					if res == "":
+						continue
+					gain += production.get(res, 0.0) * (float(eff[key][kind]) - 1.0) \
+							* float(Balance.RESOURCE_VALUE.get(res, 1.0))
+			"knowledge_mult":
+				gain += production.get("knowledge", 0.0) * (float(eff[key]) - 1.0) \
+						* float(Balance.RESOURCE_VALUE["knowledge"])
+	if gain <= 0.0001:
+		return -1.0
+	return spend / gain
+
+
+func _kind_resource(kind: String) -> String:
+	for job_id in Balance.JOB_ORDER:
+		if String(Balance.JOBS[job_id]["kind"]) == kind:
+			return job_resource(job_id)
+	return ""
+
+
 
 ## The nth of anything costs `base x growth^n`. Geometric costs against linear
 ## output is the engine of the whole economy: the next one is always a little
@@ -1347,8 +1768,7 @@ func _auto_buy_upgrade() -> void:
 	if id == "":
 		return
 	var cost := upgrade_cost(id)
-	var reserved := research_cost() if researching != "" else 0.0
-	if resources["knowledge"] >= cost + reserved:
+	if resources["knowledge"] >= cost and cost <= resources["knowledge"] * 0.5:
 		buy_upgrade(id)
 
 
@@ -1385,6 +1805,7 @@ func _rebuild_mods() -> void:
 	_woodlot_slots = 0.0
 	_birth_mult = 1.0
 	_territory_bonus = 0.0
+	_legacy_mult = 1.0 + legacy_points * Balance.LEGACY_BONUS_PER_POINT
 
 	for id in techs:
 		_apply_effects(Balance.TECHS[id]["effects"], 1)
@@ -1581,12 +2002,36 @@ func add_log(text: String, kind: String = "info") -> void:
 
 # --- Save / load ------------------------------------------------------------
 
+func _history_to_save() -> Dictionary:
+	var out := {}
+	for series in Balance.HISTORY_SERIES:
+		out[series] = Array(history.get(series, PackedFloat32Array()))
+	return out
+
+
+func _history_from_save(d: Variant) -> void:
+	history = {}
+	for series in Balance.HISTORY_SERIES:
+		var arr := PackedFloat32Array()
+		if d is Dictionary and (d as Dictionary).has(series):
+			for v in (d as Dictionary)[series]:
+				arr.append(float(v))
+		history[series] = arr
+
+
 func to_dict() -> Dictionary:
 	return {
 		"version": Balance.SAVE_VERSION,
 		"day": day,
 		"population": population,
 		"peak_population": peak_population,
+		"legacy_points": legacy_points,
+		"lifetime_output": lifetime_output,
+		"boon_id": boon_id,
+		"boon_tile": boon_tile,
+		"boon_expires": boon_expires,
+		"omen_until": _omen_until,
+		"history": _history_to_save(),
 		"era": era,
 		"milestone": _milestone,
 		"resources": resources.duplicate(),
@@ -1616,6 +2061,13 @@ func from_dict(d: Dictionary) -> void:
 	day = float(d.get("day", 0.0))
 	population = float(d.get("population", 6.0))
 	peak_population = maxf(population, float(d.get("peak_population", population)))
+	legacy_points = float(d.get("legacy_points", 0.0))
+	lifetime_output = float(d.get("lifetime_output", 0.0))
+	boon_id = String(d.get("boon_id", ""))
+	boon_tile = int(d.get("boon_tile", -1))
+	boon_expires = float(d.get("boon_expires", 0.0))
+	_omen_until = float(d.get("omen_until", -1.0))
+	_history_from_save(d.get("history", {}))
 	era = int(d.get("era", 0))
 	_milestone = int(d.get("milestone", 0))
 	auto_assign = bool(d.get("auto_assign", true))

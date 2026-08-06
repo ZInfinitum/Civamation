@@ -8,6 +8,7 @@ extends Node
 signal changed
 
 const PATH := "user://settings.cfg"
+const CSV_PATH := "user://civamation_log.csv"
 
 # --- Audio ---
 var master_volume := 0.8
@@ -29,7 +30,10 @@ var high_contrast := false
 # --- Game ---
 ## Off by default. The default game is a calm one you leave running; disasters
 ## are for players who want the world to push back.
-var disasters := false
+## 0 off, 1 rare, 2 normal, 3 harsh - index into Balance.DISASTER_FREQUENCY.
+var disaster_frequency := 0
+## Writes one CSV row per in-game day to CSV_PATH. For balance work.
+var csv_logging := false
 var autosave_seconds := 20.0
 var confirm_new_world := true
 ## Show the running commentary of everything the settlement does. Verbose, and
@@ -58,7 +62,8 @@ func load_settings() -> void:
 	reduce_motion = bool(cfg.get_value("display", "reduce_motion", reduce_motion))
 	high_contrast = bool(cfg.get_value("display", "high_contrast", high_contrast))
 
-	disasters = bool(cfg.get_value("game", "disasters", disasters))
+	disaster_frequency = int(cfg.get_value("game", "disaster_frequency", disaster_frequency))
+	csv_logging = bool(cfg.get_value("game", "csv_logging", csv_logging))
 	autosave_seconds = float(cfg.get_value("game", "autosave_seconds", autosave_seconds))
 	confirm_new_world = bool(cfg.get_value("game", "confirm_new_world", confirm_new_world))
 	verbose_log = bool(cfg.get_value("game", "verbose_log", verbose_log))
@@ -78,7 +83,8 @@ func save_settings() -> void:
 	cfg.set_value("display", "reduce_motion", reduce_motion)
 	cfg.set_value("display", "high_contrast", high_contrast)
 
-	cfg.set_value("game", "disasters", disasters)
+	cfg.set_value("game", "disaster_frequency", disaster_frequency)
+	cfg.set_value("game", "csv_logging", csv_logging)
 	cfg.set_value("game", "autosave_seconds", autosave_seconds)
 	cfg.set_value("game", "confirm_new_world", confirm_new_world)
 	cfg.set_value("game", "verbose_log", verbose_log)
@@ -121,7 +127,8 @@ func reset_to_defaults() -> void:
 	show_fps = false
 	reduce_motion = false
 	high_contrast = false
-	disasters = false
+	disaster_frequency = 0
+	csv_logging = false
 	autosave_seconds = 20.0
 	confirm_new_world = true
 	verbose_log = false

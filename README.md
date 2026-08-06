@@ -66,6 +66,13 @@ Render a real frame to a PNG (needs a display, or `xvfb-run`):
 godot --path . --resolution 1280x720 res://tools/Screenshot.tscn -- --days 300 --out shot.png
 ```
 
+## Legacy
+
+When a civilisation has done enough, you can set it down. Everything standing
+is lost - the buildings, the fields, the people, the map - and what survives is
+what they worked out. Legacy is a permanent percentage on every trade in every
+run afterwards, earned from everything this one ever produced.
+
 ## Controls
 
 Everything is reachable with a gamepad — the UI is focus-navigable throughout,
@@ -80,7 +87,9 @@ which console certification will require later and which costs nothing now.
 
 Settings covers audio, fullscreen, vsync, interface scale, reduced motion, high
 contrast, autosave interval, a verbose log for play-testing, and natural
-disasters (fires, floods, hurricanes, tornados) which are **off by default**.
+disasters (fires, floods, hurricanes, tornados) which are **off by default** and
+have Rare / Normal / Harsh settings. There is also a CSV recorder - one row per
+in-game day - for balance work.
 
 The game autosaves every 20 seconds and on focus loss, and credits up to 12
 hours of offline progress when you come back.
