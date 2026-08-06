@@ -17,7 +17,7 @@ extends Node
 ##    is the Cookie Clicker engine: there is always a next purchase, the numbers
 ##    never stop climbing, and nothing ever hard-caps.
 
-const SAVE_VERSION := 5
+const SAVE_VERSION := 6
 
 # --- Time -------------------------------------------------------------------
 ## Real seconds per in-game day at 1x speed.
@@ -38,7 +38,12 @@ const MAX_STEPS_PER_FRAME := 12
 ## logistic integration well inside its stable range.
 const MAX_OFFLINE_STEPS := 6000
 const MAX_OFFLINE_STEP_DAYS := 2.0
-const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0]
+## Later speeds unlock with the eras. Four is far too slow once a decision
+## takes a hundred days to pay off, and the simulation has the headroom.
+const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0]
+const SPEED_LABELS: Array[String] = ["II", "1x", "2x", "4x", "8x", "16x"]
+## Era needed for each speed. Index matches SPEEDS.
+const SPEED_UNLOCK_ERA: Array[int] = [0, 0, 0, 0, 3, 5]
 
 # --- Population -------------------------------------------------------------
 const FOOD_PER_PERSON_PER_DAY := 1.0
@@ -96,7 +101,11 @@ const STONE_PER_QUARRIER := 1.10
 const ORE_PER_MINER := 0.95
 ## Gold comes up alongside the ore, in far smaller quantities.
 const GOLD_PER_MINER := 0.045
-const KNOWLEDGE_PER_THINKER := 0.18
+const KNOWLEDGE_PER_THINKER := 0.22
+## Elders have diminishing returns to headcount. See the note in Sim._produce -
+## this exponent is what stops population and knowledge feeding each other into
+## a run that finishes the tech tree in a quarter of an hour.
+const THINKER_EXPONENT := 0.58
 ## Ambient learning: even with nobody assigned, a bigger tribe accumulates
 ## know-how. Scales with sqrt(pop) so it never outruns dedicated thinkers.
 const AMBIENT_KNOWLEDGE := 0.060
@@ -448,7 +457,23 @@ const BUILDING_ORDER: Array[String] = [
 ## unlock once enough people work it, and each one *doubles* that trade's
 ## output. Buildings creep; upgrades jump. Paid for in Knowledge, which is why
 ## Elders and Shrines matter long after the tech tree is finished.
-const UPGRADE_MULT := 2.0
+const UPGRADE_MULT := 1.75
+## At these tiers the upgrade comes as a pair and buying one closes the other
+## for the run. The cheapest possible way to put a real commitment into a system
+## the player already visits constantly - and something for Legacy to
+## reconsider next time.
+const BRANCH_TIERS: Array[int] = [3, 7]
+const BRANCH_DEEP := {"self": 2.9, "other": 0.8}
+const BRANCH_BROAD := {"self": 1.7, "other": 1.35}
+## Which trade each one trades against.
+const BRANCH_PARTNER := {
+	"game": "forage", "forage": "game",
+	"forest": "timber", "timber": "forest",
+	"farm": "water", "water": "farm",
+	"ore": "stone", "stone": "ore",
+	"build": "knowledge", "knowledge": "build",
+	"explore": "knowledge",
+}
 ## Unlocked by lifetime output, not by headcount. Gating on how many people
 ## work a trade sounds natural and is a dead end: the labour planner only ever
 ## hires what is needed, so a tier wanting three thousand foresters would never
@@ -456,18 +481,16 @@ const UPGRADE_MULT := 2.0
 ## Total ever produced always climbs, so there is always a next upgrade - which
 ## is what keeps spare hands worth putting on Knowledge for ever.
 const UPGRADE_TIERS := [
-	{"output": 150.0, "cost": 60.0},
-	{"output": 1200.0, "cost": 300.0},
-	{"output": 9000.0, "cost": 1400.0},
-	{"output": 65000.0, "cost": 6500.0},
-	{"output": 450000.0, "cost": 30000.0},
-	{"output": 3.0e6, "cost": 140000.0},
-	{"output": 2.0e7, "cost": 650000.0},
-	{"output": 1.4e8, "cost": 3.0e6},
-	{"output": 9.0e8, "cost": 1.4e7},
-	{"output": 6.0e9, "cost": 6.5e7},
-	{"output": 4.0e10, "cost": 3.0e8},
-	{"output": 2.5e11, "cost": 1.4e9},
+	{"output": 200.0, "cost": 60.0},
+	{"output": 2.0e3, "cost": 400.0},
+	{"output": 2.0e4, "cost": 2500.0},
+	{"output": 2.0e5, "cost": 15000.0},
+	{"output": 2.0e6, "cost": 90000.0},
+	{"output": 2.0e7, "cost": 5.0e5},
+	{"output": 2.0e8, "cost": 3.0e6},
+	{"output": 2.0e9, "cost": 1.8e7},
+	{"output": 2.0e10, "cost": 1.0e8},
+	{"output": 2.0e11, "cost": 6.0e8},
 ]
 
 ## Flavour per trade, indexed by tier. Cosmetic, but it is most of what makes
@@ -720,7 +743,7 @@ const MILESTONES := [
 ## far from enough that one enormous run ends the game. The divisor is then set
 ## so a first ascension around day 700 is worth roughly +75% rather than the
 ## +900% an earlier pass produced, which made the second run a formality.
-const LEGACY_DIVISOR := 5000000000000.0
+const LEGACY_DIVISOR := 5000000.0
 const LEGACY_EXPONENT := 0.33
 ## Each point is a flat percentage on every trade, for ever.
 const LEGACY_BONUS_PER_POINT := 0.03
@@ -958,6 +981,192 @@ const OUTPOST_MIN_DISTANCE := 8.0
 ## Each outpost adds this much worked land, and its tile's richness on top.
 const OUTPOST_TERRITORY := 1.2
 const OUTPOST_MAX := 12
+
+# --- Seasons ----------------------------------------------------------------
+## A four-phase year. One extra term in the multiplier chain and no new state,
+## and it does three things at once: it gives the game a rhythm instead of a
+## monotone climb, it makes storage and spoilage matter, and it makes *when* you
+## issue a decree a real question.
+##
+## Winter is deliberately hard on farming and gentle on nothing. The never-lose
+## floor sits underneath it, so a bad winter costs momentum rather than the
+## settlement - which is exactly the shape the whole game is tuned to.
+const DAYS_PER_YEAR := 360.0
+const SEASONS := [
+	{
+		"name": "Spring", "color": Color("8fbf6a"),
+		"note": "Everything green at once, and nothing ripe yet.",
+		"mult": {"forage": 1.35, "farm": 0.85, "game": 1.05, "explore": 1.15},
+	},
+	{
+		"name": "Summer", "color": Color("d9a441"),
+		"note": "Long days. The fields do the work.",
+		"mult": {"farm": 1.45, "forage": 1.15, "game": 0.85, "build": 1.15},
+	},
+	{
+		"name": "Autumn", "color": Color("c9803f"),
+		"note": "The harvest and the hunt, both at once, and no time to waste.",
+		"mult": {"farm": 1.30, "game": 1.45, "forage": 1.05, "timber": 1.15},
+	},
+	{
+		"name": "Winter", "color": Color("8fa8bf"),
+		"note": "What is in the store is what there is.",
+		"mult": {"farm": 0.52, "forage": 0.64, "game": 0.88, "build": 0.85, "explore": 0.7},
+	},
+]
+
+# --- Opening ----------------------------------------------------------------
+## The first few minutes used to be six people, nothing affordable and nothing
+## to decide. These are scripted beats: a prompt, and something visible that
+## happens when you act on it. Advisory only - the settlement gets there on its
+## own either way - but they teach the systems in the order they matter.
+const OPENING_BEATS := [
+	{
+		"id": "fire", "text": "Somebody should get a fire going. Build a Fire Pit - it is the "
+			+ "cheapest thing you will ever build and it improves everything after it.",
+	},
+	{
+		"id": "scout", "text": "Nobody knows what is over the ridge, and the settlement cannot "
+			+ "claim ground nobody has walked. Put someone on Explorers.",
+	},
+	{
+		"id": "shelter", "text": "People are sleeping under hides. Windbreaks are rough, cheap, "
+			+ "and the difference between a band and a camp.",
+	},
+	{
+		"id": "decree", "text": "You can issue a decree - a real bonus paid for with a real cost. "
+			+ "The elders never will. Look at the Rule tab.",
+	},
+	{
+		"id": "winter", "text": "Winter is coming and the fields will give almost nothing. "
+			+ "What is in the store is what there is.",
+	},
+]
+
+# --- Notable people ---------------------------------------------------------
+## One or two named individuals per era, attached to something that actually
+## happened. A name table and an event hook; buys attachment nothing else can.
+const GIVEN_NAMES := [
+	"Aya", "Bern", "Cass", "Dela", "Eiric", "Fen", "Gita", "Hald", "Ines", "Joro",
+	"Kesh", "Lira", "Mabon", "Nera", "Oskar", "Pell", "Quen", "Ruda", "Sten", "Tal",
+	"Ulla", "Vig", "Wren", "Yara", "Zev", "Anwe", "Bodil", "Cyr", "Dag", "Elke",
+	"Fyn", "Gero", "Hesta", "Ivar", "Juna", "Kilda", "Lem", "Mira", "Noll", "Ovid",
+]
+
+const NOTABLE_ROLES := {
+	"tech": ["who would not let it go", "who kept asking", "who worked it out",
+		"who tried it eleven times"],
+	"era": ["who was born the year it changed", "who remembers when it was six of them",
+		"who named the place"],
+	"ruins": ["who went furthest", "who came back with it", "who read the marks"],
+	"council": ["who argued for it", "who was overruled and was right",
+		"who said nothing and was listened to"],
+	"outpost": ["who walked out and stayed", "who chose the hillside"],
+}
+
+# --- Achievements -----------------------------------------------------------
+## For odd play, not for playing. An achievement for merely continuing is
+## wallpaper; one that describes a strategy teaches the game's depth to somebody
+## who had not noticed it was there.
+const ACHIEVEMENTS := {
+	"vegetarian": {
+		"name": "Not One Hunter",
+		"desc": "Reach the Neolithic Village without a single day of hunting.",
+	},
+	"island_steel": {
+		"name": "Steel on Scattered Rocks",
+		"desc": "Reach the Age of Steel on an Archipelago world.",
+	},
+	"early_ascent": {
+		"name": "A Short Bright Life",
+		"desc": "Set a civilisation down before day 400.",
+	},
+	"cartographer": {
+		"name": "The Whole Country",
+		"desc": "Map every reachable tile of a world.",
+	},
+	"all_shapes": {
+		"name": "Four Worlds",
+		"desc": "Found a settlement on each of the four world shapes.",
+	},
+	"mastery": {
+		"name": "Nothing Left to Learn",
+		"desc": "Buy every upgrade available to a single trade.",
+	},
+	"deep_winter": {
+		"name": "The Hungry Decade",
+		"desc": "Come through a stretch where the people went hungry for a hundred days, and grow again.",
+	},
+	"myriad": {
+		"name": "Ten Thousand",
+		"desc": "Ten thousand people under one set of walls.",
+	},
+	"untouched": {
+		"name": "Left the Land Alone",
+		"desc": "Reach the Bronze Age with the herds and the forest both above 80%.",
+	},
+	"chain": {
+		"name": "A Run of Luck",
+		"desc": "Hold five boons at once.",
+	},
+}
+
+const ACHIEVEMENT_ORDER: Array[String] = ["vegetarian", "island_steel", "early_ascent",
+	"cartographer", "all_shapes", "mastery", "deep_winter", "myriad", "untouched", "chain"]
+
+# --- Legacy perks -----------------------------------------------------------
+## Legacy was a flat multiplier: earned, then forgotten. Spending it on
+## permanent unlocks turns prestige into a build order, which is the largest
+## addition to replay value available and costs nothing at runtime.
+const LEGACY_PERKS := {
+	"remembered_fire": {
+		"name": "Remembered Fire", "cost": 3,
+		"desc": "Every civilisation begins knowing Fire Mastery and Knapped Tools.",
+	},
+	"old_maps": {
+		"name": "Old Maps", "cost": 5,
+		"desc": "Begin with a wide stretch of the country already walked.",
+	},
+	"full_granary": {
+		"name": "A Full Granary", "cost": 4,
+		"desc": "Begin with food, timber and stone enough to build immediately.",
+	},
+	"seed_stock": {
+		"name": "Seed Stock", "cost": 12,
+		"desc": "Begin knowing Agriculture, and with the first plots already broken.",
+	},
+	"restless": {
+		"name": "Restless", "cost": 8,
+		"desc": "Decrees can be changed twice as often.",
+	},
+	"long_memory": {
+		"name": "Long Memory", "cost": 10,
+		"desc": "Knowledge accumulates 60% faster, in every run, for ever.",
+	},
+	"deep_roots": {
+		"name": "Deep Roots", "cost": 15,
+		"desc": "Births 40% more frequent and shelter holds a quarter more people.",
+	},
+	"prospectors": {
+		"name": "Prospectors' Instinct", "cost": 20,
+		"desc": "Seams give half again as much, in every run.",
+	},
+}
+
+const LEGACY_PERK_ORDER: Array[String] = ["remembered_fire", "full_granary", "old_maps",
+	"restless", "long_memory", "seed_stock", "deep_roots", "prospectors"]
+
+# --- Trade ------------------------------------------------------------------
+## Gold had one sink and no pressure. A standing exchange gives it a purpose,
+## makes exploration pay in a second currency, and is a decision the planner
+## cannot make because it depends on what you intend to build next.
+const TRADE_UNLOCK_TECH := "coinage"
+## Fraction of daily production of the exported good that goes out.
+const TRADE_EXPORT_FRACTION := 0.30
+## Value kept in the exchange. The rest is the caravan's cut.
+const TRADE_EFFICIENCY := 0.72
+## Gold per day per hundred people to keep a route open.
+const TRADE_GOLD_UPKEEP := 0.04
 
 # --- World ------------------------------------------------------------------
 ## Big enough that walking to the edge is a project, which is the point of

@@ -29,6 +29,7 @@ var _era_label: Label
 var _day_label: Label
 var _pop_label: Label
 var _fps_label: Label
+var _season_label: Label
 var _speed_buttons: Array[Button] = []
 
 # Panels
@@ -60,6 +61,9 @@ var _decree_list: VBoxContainer
 var _festival_button: Button
 var _outpost_button: Button
 var _rule_note: Label
+var _trade_note: Label
+var _trade_sell: OptionButton
+var _trade_buy: OptionButton
 var _council_dialog: AcceptDialog
 var _placing_outpost := false
 
@@ -118,6 +122,10 @@ func _ready() -> void:
 	_replay_log()
 	_on_settings_changed()
 	_refresh()
+	# Whatever happened while the game was closed, told properly rather than as
+	# one line in the log.
+	if not Sim.offline_digest.is_empty():
+		_show_digest()
 
 
 func _fit_to_viewport() -> void:
@@ -249,13 +257,15 @@ func _build_top_bar() -> Control:
 	_fps_label = _text("", 12, MUTED)
 	row.add_child(_fps_label)
 
+	_season_label = _text("", 13, TEXT)
+	row.add_child(_season_label)
+
 	_speed_buttons.clear()
-	var labels := ["II", "1x", "2x", "4x"]
-	for i in labels.size():
+	for i in Balance.SPEEDS.size():
 		var b := Button.new()
-		b.text = labels[i]
+		b.text = String(Balance.SPEED_LABELS[i])
 		b.toggle_mode = true
-		b.custom_minimum_size.x = 40
+		b.custom_minimum_size.x = 36
 		b.pressed.connect(_set_speed.bind(i))
 		row.add_child(b)
 		_speed_buttons.append(b)
@@ -283,6 +293,11 @@ func _build_top_bar() -> Control:
 		Sim.surge(100.0)
 		_dirty = true)
 	row.add_child(_surge_button)
+
+	var chron_btn := Button.new()
+	chron_btn.text = "Chronicle"
+	chron_btn.pressed.connect(_open_chronicle)
+	row.add_child(chron_btn)
 
 	var settings_btn := Button.new()
 	settings_btn.text = "Settings"
@@ -521,6 +536,37 @@ func _build_right_column() -> Control:
 	rule.add_child(_wrapped(("Founded by hand on ground your explorers have walked, at least "
 			+ "%d tiles out. It sends back whatever that country gives - so where you put "
 			+ "it is the whole decision.") % int(Balance.OUTPOST_MIN_DISTANCE)))
+	rule.add_child(_heading("TRADE"))
+	_trade_note = _wrapped("", 12, MUTED)
+	rule.add_child(_trade_note)
+	var trade_row := HBoxContainer.new()
+	trade_row.add_theme_constant_override("separation", 6)
+	_trade_sell = OptionButton.new()
+	_trade_buy = OptionButton.new()
+	for picker in [_trade_sell, _trade_buy]:
+		picker.add_item("—", 0)
+		for i in Balance.RESOURCE_ORDER.size():
+			var rid: String = Balance.RESOURCE_ORDER[i]
+			if rid == "knowledge":
+				continue
+			picker.add_item(String(Balance.RESOURCES[rid]["name"]), i + 1)
+	trade_row.add_child(_text("send", 12, MUTED))
+	trade_row.add_child(_trade_sell)
+	trade_row.add_child(_text("get", 12, MUTED))
+	trade_row.add_child(_trade_buy)
+	var trade_btn := Button.new()
+	trade_btn.text = "Agree"
+	trade_btn.pressed.connect(func() -> void:
+		var s_id := _picker_resource(_trade_sell)
+		var b_id := _picker_resource(_trade_buy)
+		Sim.set_trade(s_id, b_id)
+		_dirty = true)
+	trade_row.add_child(trade_btn)
+	rule.add_child(trade_row)
+	rule.add_child(_wrapped("A standing exchange with the peoples your explorers found. "
+			+ "Sends out a slice of one good's production and brings back another, minus "
+			+ "the caravan's cut, for a little gold a day. Set it to nothing to close it."))
+
 	tabs.add_child(_panel_of(rule))
 
 	var tech := _tab_scroll("Knowledge")
@@ -613,6 +659,13 @@ func _kind_name(kind: String) -> String:
 		if String(Balance.JOBS[job_id]["kind"]) == kind:
 			return String(Balance.JOBS[job_id]["name"]).to_lower()
 	return kind
+
+
+func _picker_resource(picker: OptionButton) -> String:
+	var id := picker.get_selected_id()
+	if id <= 0:
+		return ""
+	return String(Balance.RESOURCE_ORDER[id - 1])
 
 
 # --- Council ----------------------------------------------------------------
@@ -815,7 +868,11 @@ func _rebuild_upgrades() -> void:
 		head.add_child(name_label)
 		head.add_child(_text("%s know." % Balance.fmt(Sim.upgrade_cost(id)), 12, MUTED))
 		v.add_child(head)
-		v.add_child(_wrapped("%s produce twice as much." % job["name"]))
+		var eff := _wrapped(Sim.upgrade_effect_text(id))
+		if Sim.is_branch_tier(int(Sim.upgrade_parts(id)[1])):
+			eff.add_theme_color_override("font_color", ACCENT)
+			v.add_child(_text("A choice — taking one closes the other", 11, ACCENT))
+		v.add_child(eff)
 		var btn := Button.new()
 		btn.text = "Buy"
 		btn.pressed.connect(func() -> void:
@@ -861,9 +918,9 @@ func _refresh_summary() -> void:
 	if world != null:
 		bits.append("%d%% of the world mapped" % int(world.explored_fraction() * 100.0))
 	bits.append("%d techs, %d upgrades" % [Sim.techs.size(), Sim.upgrades.size()])
-	if Sim.legacy_points > 0.0:
-		bits.append("%s Legacy (+%d%% to everything)" % [Balance.fmt(Sim.legacy_points),
-				int(round(Sim.legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0))])
+	if Profile.legacy_points > 0.0:
+		bits.append("%s Legacy (+%d%% to everything)" % [Balance.fmt(Profile.legacy_points),
+				int(round(Profile.legacy_points * Balance.LEGACY_BONUS_PER_POINT * 100.0))])
 	if Sim.omen_active():
 		bits.append("omen: everything doubled")
 	if Sim.momentum_active():
@@ -873,10 +930,19 @@ func _refresh_summary() -> void:
 		bits.append("festival on")
 	if Sim.decree != "":
 		bits.append("decree: %s" % Balance.DECREES[Sim.decree]["name"])
+	if Sim.trade_sell != "":
+		bits.append("trading %s for %s" % [
+				String(Balance.RESOURCES[Sim.trade_sell]["name"]).to_lower(),
+				String(Balance.RESOURCES[Sim.trade_buy]["name"]).to_lower()])
 	if not Sim.outposts.is_empty():
 		bits.append("%d outposts" % Sim.outposts.size())
 	_summary.text = "  -  ".join(bits)
-	_plan_label.text = Sim.plan_reason if Sim.auto_assign else "Work assigned by hand."
+	if Sim.beat_text != "":
+		_plan_label.text = "→  " + Sim.beat_text
+		_plan_label.add_theme_color_override("font_color", ACCENT)
+	else:
+		_plan_label.text = Sim.plan_reason if Sim.auto_assign else "Work assigned by hand."
+		_plan_label.add_theme_color_override("font_color", MUTED)
 
 	# Decrees
 	var can_switch := Sim.can_set_decree()
@@ -907,6 +973,18 @@ func _refresh_summary() -> void:
 			else "Found an outpost  -  %s" % _cost_text(oc).replace("Costs ", ""))
 	_outpost_button.disabled = Sim.outposts.size() >= Balance.OUTPOST_MAX
 
+	if Sim.can_trade():
+		_trade_note.text = ("Currently sending %s and receiving %s." % [
+				String(Balance.RESOURCES[Sim.trade_sell]["name"]).to_lower(),
+				String(Balance.RESOURCES[Sim.trade_buy]["name"]).to_lower()]
+				) if Sim.trade_sell != "" else "No route open."
+		_trade_sell.disabled = false
+		_trade_buy.disabled = false
+	else:
+		_trade_note.text = "Needs Coinage, and somebody to trade with."
+		_trade_sell.disabled = true
+		_trade_buy.disabled = true
+
 	if Sim.council_id != "" and _council_dialog == null:
 		_open_council()
 
@@ -921,9 +999,9 @@ func _refresh_summary() -> void:
 	else:
 		_boon_button.visible = false
 
-	_legacy_button.visible = Sim.can_ascend()
-	if _legacy_button.visible:
-		_legacy_button.text = "Legacy +%s" % Balance.fmt(Sim.legacy_on_offer())
+	_legacy_button.visible = Sim.can_ascend() or Profile.legacy_points > 0.0
+	_legacy_button.text = ("Legacy +%s" % Balance.fmt(Sim.legacy_on_offer())
+			) if Sim.can_ascend() else "Legacy %s" % Balance.fmt(Profile.legacy_points)
 	_surge_button.visible = Settings.verbose_log
 
 
@@ -931,8 +1009,16 @@ func _refresh_top() -> void:
 	_era_label.text = Sim.era_name()
 	_day_label.text = "Year %d, day %d" % [int(Sim.day / 360.0) + 1, int(Sim.day) % 360 + 1]
 	_pop_label.text = "%s people" % Balance.fmt_count(Sim.population)
+	var top := Sim.max_speed_index()
 	for i in _speed_buttons.size():
 		_speed_buttons[i].button_pressed = (i == Sim.speed_index)
+		_speed_buttons[i].disabled = i > top
+		_speed_buttons[i].tooltip_text = "" if i <= top else "Unlocks in the %s" \
+				% Balance.ERAS[Balance.SPEED_UNLOCK_ERA[i]]["name"]
+	var season: Dictionary = Balance.SEASONS[Sim.season]
+	_season_label.text = String(season["name"])
+	_season_label.add_theme_color_override("font_color", season["color"])
+	_season_label.tooltip_text = String(season["note"])
 
 
 func _refresh_resources() -> void:
@@ -1257,47 +1343,190 @@ func _open_new_world() -> void:
 	dlg.popup_centered()
 
 
+# --- Chronicle --------------------------------------------------------------
+
+## The event log was always a history; it was simply thrown away. This is the
+## same data, kept, grouped by era, and readable as a document.
+func _open_chronicle() -> void:
+	var dlg := AcceptDialog.new()
+	dlg.title = "The Chronicle"
+	dlg.ok_button_text = "Close"
+	dlg.min_size = Vector2i(620, 560)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(590, 480)
+	var v := VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_theme_constant_override("separation", 4)
+	scroll.add_child(v)
+	dlg.add_child(scroll)
+
+	if Sim.chronicle.is_empty() and Sim.notables.is_empty():
+		v.add_child(_wrapped("Nothing worth writing down has happened yet.", 13, MUTED))
+	var last_era := -1
+	for e in Sim.chronicle:
+		var era_i := int(e.get("era", 0))
+		if era_i != last_era:
+			last_era = era_i
+			v.add_child(_text(String(Balance.ERAS[era_i]["name"]), 15, ACCENT))
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		var day_label := _text("Day %d" % int(e.get("day", 0)), 12, MUTED)
+		day_label.custom_minimum_size.x = 66
+		row.add_child(day_label)
+		var body := _wrapped(String(e.get("text", "")), 13, TEXT)
+		body.custom_minimum_size.x = 460
+		row.add_child(body)
+		v.add_child(row)
+
+	if not Sim.notables.is_empty():
+		v.add_child(_heading("PEOPLE WORTH REMEMBERING"))
+		for n in Sim.notables:
+			v.add_child(_wrapped("%s, %s — %s  (day %d)" % [n.get("name", ""),
+					n.get("role", ""), n.get("what", ""), int(n.get("day", 0))], 13, TEXT))
+
+	dlg.close_requested.connect(dlg.queue_free)
+	dlg.confirmed.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered()
+
+
+# --- Offline digest ---------------------------------------------------------
+
+## What happened while nobody was watching. The data was always recorded; only
+## the telling was missing.
+func _show_digest() -> void:
+	var d := Sim.offline_digest
+	Sim.offline_digest = {}
+	if d.is_empty() or int(d.get("days", 0)) < 3:
+		return
+	var dlg := AcceptDialog.new()
+	dlg.title = "While You Were Away"
+	dlg.ok_button_text = "Carry on"
+	dlg.min_size = Vector2i(460, 260)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	dlg.add_child(v)
+	v.add_child(_text("%d days passed." % int(d.get("days", 0)), 16, ACCENT))
+	v.add_child(_text("The people went from %s to %s." % [
+			Balance.fmt_count(float(d.get("pop_before", 0.0))),
+			Balance.fmt_count(float(d.get("pop_after", 0.0)))], 14, TEXT))
+	for line in [
+		["%d new techs" % int(d.get("techs", 0)), int(d.get("techs", 0)) > 0],
+		["%d upgrades bought" % int(d.get("upgrades", 0)), int(d.get("upgrades", 0)) > 0],
+		["%d era advanced" % int(d.get("eras", 0)), int(d.get("eras", 0)) > 0],
+		["%d%% more of the world mapped" % int(d.get("explored", 0.0)), float(d.get("explored", 0.0)) >= 1.0],
+	]:
+		if bool(line[1]):
+			v.add_child(_text(String(line[0]), 13, GOOD))
+	var elders := int(d.get("elders_decided", 0))
+	if elders > 0:
+		v.add_child(_wrapped("The elders answered %d question%s without you. Their choices are "
+				% [elders, "" if elders == 1 else "s"] + "always safe and never the best.",
+				13, BAD))
+	dlg.close_requested.connect(dlg.queue_free)
+	dlg.confirmed.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered()
+
+
 # --- Legacy -----------------------------------------------------------------
 
 func _open_legacy() -> void:
 	var dlg := AcceptDialog.new()
 	dlg.title = "Legacy"
-	dlg.ok_button_text = "Set them down"
-	dlg.add_cancel_button("Not yet")
-	dlg.min_size = Vector2i(520, 340)
+	dlg.ok_button_text = "Close"
+	dlg.min_size = Vector2i(640, 620)
 
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(610, 540)
 	var v := VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	v.add_theme_constant_override("separation", 8)
-	dlg.add_child(v)
+	scroll.add_child(v)
+	dlg.add_child(scroll)
 
+	v.add_child(_text("%s Legacy banked" % Balance.fmt(Profile.legacy_points), 17, ACCENT))
+	v.add_child(_wrapped("Earned by setting a civilisation down. Spent on things every "
+			+ "civilisation after it is born knowing. Legacy survives everything, including "
+			+ "starting a new world.", 13, TEXT))
+
+	# --- Ascend ---
 	var offer := Sim.legacy_on_offer()
-	v.add_child(_text("End this civilisation?", 16, ACCENT))
-	var body := _wrapped("Everything standing here is lost - the buildings, the fields, the "
-			+ "people, the map. What survives is what they worked out, and the songs about "
-			+ "them, and the next lot start knowing it.", 13, TEXT)
-	body.custom_minimum_size.x = 470
-	v.add_child(body)
+	v.add_child(_heading("SET THIS ONE DOWN"))
+	if offer < Balance.LEGACY_MIN_POINTS:
+		v.add_child(_wrapped("This civilisation has not yet done enough to be worth "
+				+ "remembering. Keep going.", 13, MUTED))
+	else:
+		v.add_child(_wrapped("Everything standing is lost — the buildings, the fields, the "
+				+ "people, the map. What survives is what they worked out.", 13, TEXT))
+		v.add_child(_text("Worth %s Legacy, for a total of %s (+%d%% to every trade)."
+				% [Balance.fmt(offer), Balance.fmt(Profile.legacy_points + offer),
+				int(round((Profile.legacy_points + offer) * Balance.LEGACY_BONUS_PER_POINT * 100.0))],
+				14, GOOD))
+		var row := HBoxContainer.new()
+		row.add_child(_text("Next world", 13, MUTED))
+		var picker := OptionButton.new()
+		for i in Balance.WORLD_TYPES.size():
+			picker.add_item(String(Balance.WORLD_TYPES[i]["name"]), i)
+		picker.selected = Sim.world.world_type if Sim.world != null else 0
+		row.add_child(picker)
+		var go := Button.new()
+		go.text = "Set them down"
+		go.pressed.connect(func() -> void:
+			Sim.ascend(picker.get_selected_id())
+			SaveSystem.save_game()
+			_map.view_home()
+			dlg.hide())
+		row.add_child(go)
+		v.add_child(row)
 
-	v.add_child(_text("You would carry forward %s Legacy." % Balance.fmt(offer), 15, GOOD))
-	var total := Sim.legacy_points + offer
-	v.add_child(_text("Total afterwards: %s, which is +%d%% to every trade, for ever."
-			% [Balance.fmt(total), int(round(total * Balance.LEGACY_BONUS_PER_POINT * 100.0))],
-			13, MUTED))
+	# --- Perks ---
+	v.add_child(_heading("WHAT THE NEXT ONE WILL KNOW"))
+	for id in Balance.LEGACY_PERK_ORDER:
+		var perk: Dictionary = Balance.LEGACY_PERKS[id]
+		var card := _card()
+		var head := HBoxContainer.new()
+		var owned := Profile.has_perk(id)
+		var name_label := _text(String(perk["name"]), 14, GOOD if owned else ACCENT)
+		name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head.add_child(name_label)
+		head.add_child(_text("%d" % int(perk["cost"]), 13, MUTED))
+		card.add_child(head)
+		card.add_child(_wrapped(String(perk["desc"])))
+		if owned:
+			card.add_child(_text("Known for ever.", 12, GOOD))
+		else:
+			var buy := Button.new()
+			buy.text = "Learn it (%d Legacy)" % int(perk["cost"])
+			buy.disabled = not Profile.can_buy_perk(id)
+			buy.pressed.connect(func() -> void:
+				if Profile.buy_perk(id):
+					Sim._mods_dirty = true
+					dlg.queue_free()
+					_open_legacy()
+				_dirty = true)
+			card.add_child(buy)
+		v.add_child(_panel_of(card))
 
-	var row := HBoxContainer.new()
-	row.add_child(_text("Next world", 13, MUTED))
-	var picker := OptionButton.new()
-	for i in Balance.WORLD_TYPES.size():
-		picker.add_item(String(Balance.WORLD_TYPES[i]["name"]), i)
-	picker.selected = Sim.world.world_type if Sim.world != null else 0
-	row.add_child(picker)
-	v.add_child(row)
+	# --- Achievements ---
+	v.add_child(_heading("THINGS DONE"))
+	for id in Balance.ACHIEVEMENT_ORDER:
+		var a: Dictionary = Balance.ACHIEVEMENTS[id]
+		var got := Profile.achievements.has(id)
+		var row2 := HBoxContainer.new()
+		row2.add_theme_constant_override("separation", 10)
+		var mark := _text("✓" if got else "·", 14, GOOD if got else MUTED)
+		mark.custom_minimum_size.x = 18
+		row2.add_child(mark)
+		var col := VBoxContainer.new()
+		col.add_child(_text(String(a["name"]), 13, TEXT if got else MUTED))
+		col.add_child(_wrapped(String(a["desc"]), 11, MUTED))
+		row2.add_child(col)
+		v.add_child(row2)
 
-	dlg.confirmed.connect(func() -> void:
-		Sim.ascend(picker.get_selected_id())
-		SaveSystem.save_game()
-		_map.view_home())
 	dlg.close_requested.connect(dlg.queue_free)
+	dlg.confirmed.connect(dlg.queue_free)
 	add_child(dlg)
 	dlg.popup_centered()
 
