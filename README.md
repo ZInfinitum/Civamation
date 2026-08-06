@@ -16,6 +16,25 @@ but a **hopeful** one. The herds always come back, the forest always grows
 back, and the settlement never falls below three quarters of the largest it has
 ever been. Hard stretches cost you time, never your civilization.
 
+On top of that sits an idler economy in the Cookie Clicker mould: costs grow
+geometrically, output grows with what you own, and upgrades periodically double
+a whole trade outright. Nothing caps. The numbers keep going up.
+
+## The world
+
+Pick a shape when you start one: **Earth** (continents, real climate bands,
+polar ice), **Continents** (fewer, larger landmasses), **Islands**, or
+**Archipelago** (where you will want Seafaring badly). Plains, grassland,
+forest, rainforest, hills, mountains, desert and tundra are laid out by
+elevation, latitude and rainfall; mountains are impassable until you learn to
+cross them.
+
+Tiles change. Fell a wood and it becomes a clearing until it grows back. Deer,
+wolves, rabbits and birds live where they would actually live and wander between
+tiles. Fog of war has three states: black where nobody has ever walked, faded
+where you have been but nobody is now — you remember the country but not what is
+happening on it — and full colour where somebody is standing right now.
+
 ## Running it
 
 Requires [Godot 4.4](https://godotengine.org/download) or newer. No addons, no
@@ -57,6 +76,11 @@ which console certification will require later and which costs nothing now.
 | Pause / resume | `Space` | Select / View |
 | Faster | `]` | Right shoulder |
 | Slower | `[` | Left shoulder |
+| Zoom / pan the map | wheel, drag | — |
+
+Settings covers audio, fullscreen, vsync, interface scale, reduced motion, high
+contrast, autosave interval, a verbose log for play-testing, and natural
+disasters (fires, floods, hurricanes, tornados) which are **off by default**.
 
 The game autosaves every 20 seconds and on focus loss, and credits up to 12
 hours of offline progress when you come back.
@@ -72,6 +96,7 @@ scripts/
     Balance.gd           every tuning number and data table in the game
     Sim.gd               the simulation - ecology, population, jobs, tech
     SaveSystem.gd        JSON persistence, autosave, offline credit
+    Settings.gd          player settings, separate from the save file
   sim/CivWorld.gd        world generation and the living stocks on the map
   ui/HUD.gd              the whole interface
   ui/WorldView.gd        the map, drawn with primitives
@@ -79,6 +104,7 @@ tools/headless_sim.gd    autopilot harness + save round-trip test
 tools/screenshot.gd      render a real frame to a PNG
 docs/DESIGN.md           how the simulation works and why
 docs/PLATFORMS.md        what shipping to Steam, Xbox, console and web takes
+docs/NEXT.md             how much detail this can afford, and what to build next
 ```
 
 Two files matter most. **`Balance.gd`** holds every number and every data table
