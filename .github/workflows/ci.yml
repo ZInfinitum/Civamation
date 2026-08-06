@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  GODOT_VERSION: 4.4.1
+
+jobs:
+  simulate:
+    name: Compile + simulation smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Godot
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: ~/godot
+          key: godot-${{ env.GODOT_VERSION }}-linux
+
+      - name: Install Godot
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/godot
+          curl -sSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot-extract
+          mv "/tmp/godot-extract/Godot_v${GODOT_VERSION}-stable_linux.x86_64" ~/godot/godot
+          chmod +x ~/godot/godot
+
+      - name: Import project and fail on any script error
+        run: |
+          ~/godot/godot --headless --path . --import 2>&1 | tee /tmp/import.log
+          if grep -qE "SCRIPT ERROR|Parse Error|Compile Error" /tmp/import.log; then
+            echo "::error::GDScript failed to compile"
+            grep -E "SCRIPT ERROR|Parse Error|Compile Error" /tmp/import.log | sort -u
+            exit 1
+          fi
+
+      # Plays the game on autopilot across several generated worlds and asserts
+      # the design promises actually hold: every civilisation grows, no stock is
+      # ever stripped past its refuge floor, no run loses more than a quarter of
+      # its peak, and the save file round-trips exactly.
+      - name: Simulation smoke test
+        run: ~/godot/godot --headless --path . res://tools/HeadlessSim.tscn -- --days 2000 --seeds 3
