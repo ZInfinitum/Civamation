@@ -17,7 +17,7 @@ extends Node
 ##    is the Cookie Clicker engine: there is always a next purchase, the numbers
 ##    never stop climbing, and nothing ever hard-caps.
 
-const SAVE_VERSION := 3
+const SAVE_VERSION := 4
 
 # --- Time -------------------------------------------------------------------
 ## Real seconds per in-game day at 1x speed.
@@ -118,6 +118,15 @@ const CLAIM_MARGIN := 1.5
 ## Tiles revealed per simulation step, at most - keeps the reveal smooth and
 ## the per-step cost bounded no matter how many explorers are out.
 const MAX_REVEALS_PER_STEP := 24
+
+# --- Comparable value -------------------------------------------------------
+## What a unit of each material is worth to the settlement, in one currency, so
+## the labour planner can weigh "one more miner" against "one more forester"
+## instead of handling every trade by its own private rule.
+const RESOURCE_VALUE := {
+	"food": 1.0, "water": 1.4, "wood": 0.45, "stone": 0.8,
+	"hides": 0.4, "ore": 1.6, "gold": 6.0, "knowledge": 2.2,
+}
 
 # --- Stock targets ----------------------------------------------------------
 ## With no ceilings, "enough" has to mean something else: the settlement
@@ -372,6 +381,27 @@ const BUILDINGS := {
 		"requires": "coinage", "max": 10,
 		"effects": {"knowledge_mult": 1.25, "territory": 0.5}
 	},
+	"tenement": {
+		"name": "Tenement Block",
+		"desc": "Four storeys of small rooms and a shared yard. Not beautiful. Houses a great many people.",
+		"cost": {"stone": 900.0, "wood": 400.0, "ore": 600.0}, "work": 120.0,
+		"requires": "sanitation",
+		"effects": {"housing": 260.0}
+	},
+	"workshop_row": {
+		"name": "Workshop Row",
+		"desc": "Water-driven saws, hammers and bellows under one long roof.",
+		"cost": {"stone": 700.0, "wood": 500.0, "ore": 900.0}, "work": 130.0,
+		"requires": "mechanisation",
+		"effects": {"mine_slots": 6.0, "quarry_slots": 6.0, "woodlot_slots": 6.0}
+	},
+	"university": {
+		"name": "University",
+		"desc": "Somewhere for the arguments to happen on purpose.",
+		"cost": {"stone": 1200.0, "gold": 400.0, "ore": 500.0}, "work": 160.0,
+		"requires": "printing", "max": 12,
+		"effects": {"knowledge_mult": 1.5}
+	},
 	"great_hall": {
 		"name": "Great Hall",
 		"desc": "The building that says this place intends to still be here in a hundred years.",
@@ -385,6 +415,7 @@ const BUILDING_ORDER: Array[String] = [
 	"firepit", "windbreak", "scout_camp", "drying_rack", "hut", "woodshed",
 	"farm_plot", "woodlot", "well", "longhouse", "granary", "quarry", "mine", "smelter",
 	"stone_house", "shrine", "treasury", "great_hall",
+	"tenement", "workshop_row", "university",
 ]
 
 # --- Upgrades ---------------------------------------------------------------
@@ -544,6 +575,66 @@ const TECHS := {
 		"desc": "Stamped gold. Wealth you can carry, count, and spend on people who know things. Unlocks the Treasury.",
 		"effects": {"knowledge_mult": 1.2}
 	},
+	"mathematics": {
+		"name": "Mathematics", "cost": 16000.0, "requires": ["writing"], "era": 5,
+		"desc": "Numbers that describe things nobody has counted yet.",
+		"effects": {"knowledge_mult": 1.5, "yield_mult": {"build": 1.2}}
+	},
+	"roads": {
+		"name": "Roads", "cost": 21000.0, "requires": ["steelmaking"], "era": 5,
+		"desc": "Metalled and drained, and they do not wash out in spring. Everything moves further.",
+		"effects": {"territory": 4.0, "yield_mult": {"explore": 1.5, "stone": 1.2}}
+	},
+	"aqueducts": {
+		"name": "Aqueducts", "cost": 28000.0, "requires": ["roads", "mathematics"], "era": 5,
+		"desc": "Water arrives whether or not anyone carries it.",
+		"effects": {"yield_mult": {"water": 3.0, "farm": 1.3}}
+	},
+	"astronomy": {
+		"name": "Astronomy", "cost": 38000.0, "requires": ["mathematics"], "era": 5,
+		"desc": "The year, measured. Sowing stops being a guess.",
+		"effects": {"knowledge_mult": 1.4, "yield_mult": {"farm": 1.35, "explore": 1.4}}
+	},
+	"the_keel": {
+		"name": "The Keel", "cost": 55000.0, "requires": ["astronomy", "cartography"], "era": 6,
+		"desc": "Ships that go where they are pointed, into weather that used to end voyages.",
+		"effects": {"yield_mult": {"explore": 2.5, "ore": 1.2}, "territory": 4.0}
+	},
+	"crop_science": {
+		"name": "Crop Science", "cost": 75000.0, "requires": ["astronomy"], "era": 6,
+		"desc": "Which seed, which soil, which year. Written down and argued over.",
+		"effects": {"yield_mult": {"farm": 2.0, "timber": 1.5}, "birth_mult": 1.1}
+	},
+	"blast_furnace": {
+		"name": "The Blast Furnace", "cost": 105000.0, "requires": ["the_keel"], "era": 6,
+		"desc": "Iron by the ton instead of by the bar.",
+		"effects": {"yield_mult": {"ore": 2.2, "stone": 1.5, "build": 1.4}}
+	},
+	"printing": {
+		"name": "Printing", "cost": 150000.0, "requires": ["crop_science", "mathematics"], "era": 6,
+		"desc": "A thought, copied a thousand times, cheaply. Nothing is ever forgotten again.",
+		"effects": {"knowledge_mult": 2.2}
+	},
+	"sanitation": {
+		"name": "Sanitation", "cost": 230000.0, "requires": ["printing", "aqueducts"], "era": 7,
+		"desc": "Drains, clean water, and the plain observation that the two should not mix.",
+		"effects": {"birth_mult": 1.35, "yield_mult": {"water": 1.5}}
+	},
+	"mechanisation": {
+		"name": "Mechanisation", "cost": 360000.0, "requires": ["blast_furnace", "printing"], "era": 7,
+		"desc": "Water and gearing doing what arms used to.",
+		"effects": {"yield_mult": {"timber": 2.2, "ore": 1.8, "stone": 1.8, "build": 1.8}}
+	},
+	"the_steam_engine": {
+		"name": "The Steam Engine", "cost": 600000.0, "requires": ["mechanisation"], "era": 7,
+		"desc": "Fire turned into motion. Everything after this is a different world.",
+		"effects": {"yield_mult": {"ore": 2.5, "stone": 2.0, "timber": 1.8, "build": 2.0}}
+	},
+	"public_health": {
+		"name": "Public Health", "cost": 950000.0, "requires": ["sanitation", "the_steam_engine"], "era": 7,
+		"desc": "The unglamorous work that lets a city hold a hundred thousand people.",
+		"effects": {"birth_mult": 1.4, "knowledge_mult": 1.3}
+	},
 	"steelmaking": {
 		"name": "Steelmaking", "cost": 1100.0, "requires": ["iron_working", "coinage"], "era": 4,
 		"desc": "Iron with the temper beaten into it, and a Great Hall to prove it. Your seams start yielding steel.",
@@ -557,6 +648,9 @@ const TECH_ORDER: Array[String] = [
 	"pottery", "husbandry", "agriculture", "masonry", "irrigation",
 	"mountain_paths", "bronze_working", "the_plough", "writing", "iron_working",
 	"cartography", "coinage", "steelmaking",
+	"mathematics", "roads", "aqueducts", "astronomy",
+	"the_keel", "crop_science", "blast_furnace", "printing",
+	"sanitation", "mechanisation", "the_steam_engine", "public_health",
 ]
 
 # --- Eras -------------------------------------------------------------------
@@ -567,6 +661,9 @@ const ERAS := [
 	{"name": "Bronze Age Town", "techs": 15, "pop": 110},
 	{"name": "Iron Age City", "techs": 20, "pop": 280},
 	{"name": "Age of Steel", "techs": 23, "pop": 900},
+	{"name": "Classical City-State", "techs": 27, "pop": 3000},
+	{"name": "Age of Sail", "techs": 31, "pop": 12000},
+	{"name": "Industrial Dawn", "techs": 35, "pop": 50000},
 ]
 
 ## Population milestones. Purely for the pleasure of watching a number pass a
@@ -581,6 +678,77 @@ const MILESTONES := [
 	{"pop": 250000, "text": "A quarter of a million souls under one set of walls."},
 	{"pop": 1000000, "text": "A million people. Whatever this is, it is no longer a settlement."},
 ]
+
+# --- Legacy (prestige) ------------------------------------------------------
+## A civilisation ends; the next one begins knowing what this one learned.
+##
+## This is the genre's oldest trick and the honest version of it here: you set
+## your people down, and the songs about them make the next lot faster. Legacy
+## is earned from everything you ever produced, so a long patient run and a
+## short explosive one both count.
+##
+## The exponent matters more than the divisor. At 0.55, doubling a run's output
+## gives about 1.46x the Legacy - enough that a better run is clearly better,
+## far from enough that one enormous run ends the game. The divisor is then set
+## so a first ascension around day 700 is worth roughly +75% rather than the
+## +900% an earlier pass produced, which made the second run a formality.
+const LEGACY_DIVISOR := 1500000.0
+const LEGACY_EXPONENT := 0.55
+## Each point is a flat percentage on every trade, for ever.
+const LEGACY_BONUS_PER_POINT := 0.03
+## Below this there is nothing worth carrying and the option stays hidden.
+const LEGACY_MIN_POINTS := 1.0
+
+# --- Boons ------------------------------------------------------------------
+## The idle genre's other engine: a rare, brief, visible thing that pays out if
+## you happen to be looking. It has to reward attention without punishing
+## absence, which is why every one of these is a bonus and none is a penalty.
+const BOON_INTERVAL_DAYS := 110.0
+## How long one stays on the map. At 1x this is about twenty-five seconds.
+const BOON_LIFETIME_DAYS := 13.0
+
+const BOONS := {
+	"caravan": {
+		"name": "A Caravan",
+		"text": "Traders out of the east. They will not wait long.",
+		"color": Color("e0b25a"),
+	},
+	"good_omen": {
+		"name": "A Good Omen",
+		"text": "Something in the sky that the elders like the look of. Everyone works the harder for it.",
+		"color": Color("7fbf6a"),
+	},
+	"migrating_herd": {
+		"name": "A Migrating Herd",
+		"text": "The valley fills with animals moving south. It will not come again this year.",
+		"color": Color("d98555"),
+	},
+	"wandering_scholar": {
+		"name": "A Wandering Scholar",
+		"text": "Someone who has seen other places, and will talk about them for a night.",
+		"color": Color("b08ad4"),
+	},
+}
+
+const BOON_ORDER: Array[String] = ["caravan", "good_omen", "migrating_herd", "wandering_scholar"]
+## How long a "good omen" doubles everything, in days.
+const OMEN_DAYS := 30.0
+const OMEN_MULTIPLIER := 2.0
+
+# --- Disasters, frequency ---------------------------------------------------
+## Index into this from Settings.disaster_frequency. Off is the default.
+const DISASTER_FREQUENCY := [
+	{"name": "Off", "scale": 0.0},
+	{"name": "Rare", "scale": 2.5},
+	{"name": "Normal", "scale": 1.0},
+	{"name": "Harsh", "scale": 0.45},
+]
+
+# --- History ----------------------------------------------------------------
+## One sample a day. An idle game lives on the shape of the curve, and the
+## curve is cheap: a few hundred floats is nothing next to the tile arrays.
+const HISTORY_SAMPLES := 360
+const HISTORY_SERIES: Array[String] = ["pop", "food", "herd", "output"]
 
 # --- World ------------------------------------------------------------------
 ## Big enough that walking to the edge is a project, which is the point of
@@ -792,6 +960,11 @@ static func world_type_info(id: int) -> Dictionary:
 ## readable from six people all the way to nine figures.
 static func fmt(value: float, decimals: int = 1) -> String:
 	var a := absf(value)
+	if a >= 1e18:
+		# Past quintillions the suffixes stop being worth learning.
+		return "%.2e" % value
+	if a >= 1e15:
+		return "%.2fQ" % (value / 1e15)
 	if a >= 1e12:
 		return "%.2fT" % (value / 1e12)
 	if a >= 1e9:

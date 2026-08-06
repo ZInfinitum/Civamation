@@ -127,6 +127,12 @@ func _gui_input(event: InputEvent) -> void:
 			_zoom_at(mb.position, 1.0 / 1.15)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			# A boon is a thing you go and collect, so it is clickable where it
+			# stands rather than only on the button in the top bar.
+			if mb.pressed and _boon_hit(mb.position):
+				Sim.collect_boon()
+				accept_event()
+				return
 			_dragging = mb.pressed
 			if mb.pressed:
 				grab_focus()
@@ -136,6 +142,16 @@ func _gui_input(event: InputEvent) -> void:
 		_clamp_camera()
 		_dirty = true
 		accept_event()
+
+
+## True when this screen point is on the boon marker.
+func _boon_hit(p: Vector2) -> bool:
+	var world := Sim.world
+	if world == null or Sim.boon_id == "" or Sim.boon_tile < 0:
+		return false
+	var t := world.tile_pos(Sim.boon_tile)
+	var centre := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+	return p.distance_to(centre) <= maxf(14.0, zoom * 0.8)
 
 
 func _zoom_at(screen_pos: Vector2, factor: float) -> void:
@@ -271,6 +287,7 @@ func _draw() -> void:
 	_draw_settlement(home)
 	if zoom >= DETAIL_ZOOM:
 		_draw_workers(world)
+	_draw_boon(world)
 	_draw_legend()
 
 
@@ -544,6 +561,27 @@ func _draw_group(center: Vector2, s: float, id: String, slot: int, color: Color,
 					p + Vector2(0, -s * 0.36),
 				]), color)
 	return slot
+
+
+# --- Boon -------------------------------------------------------------------
+
+## The rare, brief, visible thing. Drawn as a ring that reads as "come here"
+## without needing an explanation, and it fades as its time runs out so you can
+## see you are about to miss it.
+func _draw_boon(world: CivWorld) -> void:
+	if Sim.boon_id == "" or Sim.boon_tile < 0:
+		return
+	var t := world.tile_pos(Sim.boon_tile)
+	var centre := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+	if centre.x < -40.0 or centre.y < -40.0 or centre.x > size.x + 40.0 or centre.y > size.y + 40.0:
+		return
+	var col: Color = Balance.BOONS[Sim.boon_id]["color"]
+	var left := clampf((Sim.boon_expires - Sim.day) / Balance.BOON_LIFETIME_DAYS, 0.0, 1.0)
+	var r := maxf(12.0, zoom * 0.75)
+	draw_arc(centre, r, 0.0, TAU, 28, Color(col.r, col.g, col.b, 0.35), 3.0, true)
+	# The inner arc empties as the moment passes.
+	draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
+	draw_circle(centre, r * 0.22, col)
 
 
 # --- Legend -----------------------------------------------------------------
