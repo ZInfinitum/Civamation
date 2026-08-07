@@ -1048,7 +1048,13 @@ func _refresh_summary() -> void:
 				+ "%s people." % Balance.fmt_count(next_at)) if next_at > 0.0 \
 				else "You have founded everywhere there is to found."
 	if Sim.settlements.size() > 0:
-		_settlement_note.text += "  %d founded." % Sim.settlements.size()
+		var lines: Array[String] = ["%d founded - %s live in the capital:"
+				% [Sim.settlements.size(), Balance.fmt_count(Sim.capital_pop())]]
+		for i in Sim.settlements.size():
+			lines.append("  town %d: %s people, %.0f%% of its ground worked"
+					% [i + 1, Balance.fmt_count(Sim.settlement_pop(i)),
+					Sim.settlement_staffing(i) * 100.0])
+		_settlement_note.text += "\n" + "\n".join(lines)
 
 	if Sim.can_trade():
 		_trade_note.text = ("Currently sending %s and receiving %s." % [

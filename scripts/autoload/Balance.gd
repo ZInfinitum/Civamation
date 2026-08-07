@@ -1496,6 +1496,26 @@ const ROAD_TIERS := [
 ## rest is eaten by the journey. Connecting one is a real gain, not a rounding.
 const ROAD_ISOLATED_REACH := 0.55
 
+## --- Where people live ------------------------------------------------------
+## A settlement holds its own people now, rather than being a production
+## building with a map position. The capital holds whoever is not in one.
+##
+## Population is still a single national total with a single age structure -
+## per-town age bands would be a great deal of state for very little the player
+## could see. What is per-town is *how many*, which is what decides whether a
+## town can work its ground and whether anyone wants to move there.
+##
+## Migration is the interesting half. People go where there is room and food,
+## and they go faster along a good road - so a well-connected town fills up and
+## an isolated one stays a hamlet however good its land.
+const MIGRATION_RATE := 0.055
+## Nobody moves for a difference smaller than this; it stops the whole country
+## sloshing back and forth over rounding.
+const MIGRATION_DEADBAND := 0.06
+## A town needs about this many people per unit of its ground's value to work it
+## properly. Under-staffed towns produce proportionally less.
+const SETTLEMENT_STAFF_PER_VALUE := 2.2
+
 ## --- Wildlife density -------------------------------------------------------
 ## One animal marker used to mean "there is wildlife here", which told the player
 ## nothing about how much. A herd is a quantity, and the map is the only place

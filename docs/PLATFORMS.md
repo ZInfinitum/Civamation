@@ -33,8 +33,8 @@ millions. If you extend the era ladder past Iron Age, it needs scientific or
 suffixed notation.
 
 **More content past the Iron Age.** The simulation happily runs forever, but the
-tech tree ends at 18 techs and every building has a cap, so an autopilot run
-plateaus around 1,470 people after roughly an hour. More eras, buildings and
+tech tree ends at 37 techs and an autopilot run reaches the industrial era
+in a few thousand days. More eras, buildings and
 techs are pure data edits in `Balance.gd` — no simulation work.
 
 **Localization.** Cheap now, expensive later. All player-facing strings are

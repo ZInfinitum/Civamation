@@ -52,7 +52,7 @@ back, and the settlement never falls below three quarters of the largest it has
 ever been. A hard stretch costs the player time and momentum. It never costs
 them their civilisation. There is no lose state and there is no fail screen.
 
-There is also no ending. There are nine eras, thirty-five technologies, one
+There is also no ending. There are nine eras, thirty-seven technologies, one
 hundred and thirty-two upgrades and a prestige layer, and after all of that the
 line keeps going up.
 
@@ -276,7 +276,8 @@ radius = 3.5 + 0.028 × population + tech bonuses + outposts,  capped at 18
 ```
 
 Territory is a real constraint: a tile outside it contributes nothing however
-rich it is. Nine technologies grant territory (`tracking` +2, `settlement` +2,
+rich it is. <!-- audit-ok: doc-facts - a count of the techs that grant territory, not of all techs -->
+Nine technologies grant territory (`tracking` +2, `settlement` +2,
 `writing` +3, `cartography` +3, `roads` +4, `the_keel` +4, and others), and
 outposts add 1.2 each. When the settlement wants land it has not been shown,
 `expansion_blocked_by_exploration()` returns true and the labour planner

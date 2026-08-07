@@ -532,6 +532,23 @@ func _test_settlements() -> void:
 	if near < 8:
 		_failures.append("settlements: only %d claimed tiles lie near the new settlement - "
 				% near + "the claim is not centred on it")
+	# A town has to hold people, and people have to move into it. A settlement
+	# that never fills is a production building with a map position.
+	var founded_with := Sim.settlement_pop(0)
+	if founded_with <= 0.0:
+		_failures.append("settlements: founded with nobody living in it")
+	Sim.simulate_days(400.0, true)
+	var now_there := Sim.settlement_pop(0)
+	print("townsfolk %s -> %s of %s national, %.0f%% staffed"
+			% [Balance.fmt_count(founded_with), Balance.fmt_count(now_there),
+			Balance.fmt_count(Sim.population), Sim.settlement_staffing(0) * 100.0])
+	if now_there <= founded_with:
+		_failures.append("settlements: nobody migrated in - %.0f there after 400 days, "
+				% now_there + "founded with %.0f" % founded_with)
+	if now_there > Sim.population:
+		_failures.append("settlements: %.0f living in the town but only %.0f people exist"
+				% [now_there, Sim.population])
+
 	# And it must survive a save.
 	SaveSystem.save_game()
 	Sim.new_game(11111, Balance.WorldType.ISLANDS)

@@ -262,5 +262,5 @@ worlds and asserts the design promises hold, so they cannot quietly regress:
 - the save file round-trips all 35 tracked state fields exactly
 
 Every claim in this document is a test in CI. Three seeds over 2000 days
-currently reach ~630 people and all 18 techs with zero drawdown, herds recovered
-to 30% and forest cover at 97–99%.
+currently reach tens of thousands of people and 37 techs, with drawdown well
+inside the never-lose floor and herds living above the refuge rather than on it.

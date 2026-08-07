@@ -15,6 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Needs no engine, so it runs first and fails in seconds rather than
+      # after the Godot download.
+      - name: Static audit
+        run: python3 tools/audit.py
+
       - name: Cache Godot
         id: cache-godot
         uses: actions/cache@v4
