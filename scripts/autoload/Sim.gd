@@ -110,6 +110,15 @@ var weather_until: float = 0.0
 ## Centimetres of lying snow. Outlives the snowfall that made it and melts back
 ## with the temperature, so a hard week costs movement well after the sky clears.
 var snow_depth: float = 0.0
+
+## The population, in five-year age bands. `population` is the sum of this and
+## is kept in step; the cohorts are what actually decide who can work and who
+## dies. See Balance.COHORT_MORTALITY.
+var cohorts := PackedFloat32Array()
+## People who died of old age, of hunger, and of plain bad luck this run - kept
+## apart because the three say very different things about how it is going.
+var deaths_age: float = 0.0
+var deaths_hunger: float = 0.0
 ## Significant entries kept as the civilisation's own history.
 var chronicle: Array[Dictionary] = []
 ## Named individuals attached to things that actually happened.
@@ -244,6 +253,9 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	day = 0.0
 	population = 6.0
 	peak_population = 6.0
+	_seed_cohorts(6.0)
+	deaths_age = 0.0
+	deaths_hunger = 0.0
 	speed_index = 1
 	era = 0
 	techs.clear()
@@ -475,6 +487,7 @@ func _step(dt: float, offline: bool = false) -> void:
 	_ecology(dt)
 	_produce(dt)
 	_update_snow(dt)
+	_maybe_strike(dt)
 	_consume_and_grow(dt)
 	_progress_builds(dt)
 	_progress_research(dt)
@@ -853,7 +866,7 @@ func _maybe_disaster(dt: float, offline: bool) -> void:
 			_wreck_buildings(2)
 		"tornado":
 			_wreck_buildings(3)
-			population = maxf(Balance.MIN_POPULATION, population * 0.97)
+			_scale_cohorts(0.97)
 
 	if not offline:
 		add_log("%s. %s" % [d["name"], d["text"]], "bad")
@@ -1093,6 +1106,50 @@ func max_territory_radius() -> float:
 	return Balance.MAX_TERRITORY_RADIUS
 
 
+## Somebody kicks over a rock. Explorers are better at this than miners because
+## they are the ones looking at ground nobody has seen; miners find them by
+## following what they already work.
+##
+## A strike is the one thing that still happens underground after the ore tiers
+## have all arrived, which on the current curve is around day five hundred - so
+## this is deliberately the news of the late game rather than an income stream.
+func _maybe_strike(dt: float) -> void:
+	if world == null:
+		return
+	var chance := sqrt(float(jobs.get("explorer", 0))) * Balance.DEPOSIT_FIND_PER_EXPLORER \
+			+ sqrt(float(jobs.get("miner", 0))) * Balance.DEPOSIT_FIND_PER_MINER
+	if chance <= 0.0 or rng.randf() > chance * dt:
+		return
+	var which := world.findable_deposit(rng)
+	if which < 0:
+		return
+	var d := world.strike_deposit(which)
+	if d.is_empty():
+		return
+	var far := int(Vector2(world.tile_pos(int(d["tile"])) - world.origin).length())
+	_mods_dirty = true
+	add_log("A seam is struck %d tiles out - %s ore in the rock there."
+			% [far, "rich" if float(d["richness"]) > 7.0 else "good"], "good")
+	_chronicle("A new seam found %d tiles out." % far, "good")
+	state_changed.emit()
+
+
+## How many seams have been found, and how many there are. Shown in the
+## interface so the map always has a stated amount of news left in it.
+func deposits_found() -> int:
+	if world == null:
+		return 0
+	var n := 0
+	for d in world.deposits:
+		if bool(d["found"]):
+			n += 1
+	return n
+
+
+func deposits_total() -> int:
+	return 0 if world == null else world.deposits.size()
+
+
 # --- Weather ----------------------------------------------------------------
 
 ## Roll a new spell of weather when the last one runs out. Weighted by season,
@@ -1197,7 +1254,7 @@ func cheat_add_resources(amount: float) -> void:
 
 
 func cheat_add_population(amount: float) -> void:
-	population = maxf(Balance.MIN_POPULATION, population + amount)
+	_add_people(maxf(0.0, amount))
 	# Raise the high-water mark too, or the never-lose floor stays where it was
 	# and the new arrivals simply die back to it - which looks like the cheat
 	# not working rather than like the floor working.
@@ -1233,11 +1290,6 @@ func can_found_settlement(tile: int) -> bool:
 	for s in settlements:
 		if Vector2(world.tile_pos(int(s["tile"])) - world.tile_pos(tile)).length() \
 				< Balance.SETTLEMENT_SPACING:
-			return false
-	# The floors are eligibility, not price: you must have a real store before
-	# you can spend a share of it.
-	for res in Balance.SETTLEMENT_BASE_COST:
-		if resources.get(res, 0.0) < float(Balance.SETTLEMENT_BASE_COST[res]):
 			return false
 	return true
 
@@ -1477,7 +1529,7 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 				resources["food"] *= 0.55
 				_note("The winter is not mild. The stores take a beating.", offline)
 		"take_in":
-			population += Balance.migrant_count(population)
+			_add_people(Balance.migrant_count(population))
 			resources["knowledge"] += 60.0 + population * 1.5
 			_note("They stay. Within a month nobody can remember which of them arrived.", offline)
 		"trade":
@@ -1490,7 +1542,7 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 			_note("They are given a day's food and pointed at the road.", offline)
 		"deeper":
 			resources["ore"] += maxf(150.0, production["ore"] * 200.0)
-			population = maxf(Balance.MIN_POPULATION, population * 0.97)
+			_scale_cohorts(0.97)
 			_note("The seam is everything they hoped. Three of them do not come back up.", offline)
 		"shore_up":
 			resources["stone"] = maxf(0.0, resources["stone"] - population * 2.0)
@@ -1653,7 +1705,22 @@ func _mult(kind: String) -> float:
 	if cover > 0.01 and Balance.SNOW_MOVEMENT_PENALTY.has(kind):
 		var full := float(Balance.SNOW_MOVEMENT_PENALTY[kind])
 		m *= lerpf(1.0, full, cover)
+
+	# And the sun. Outdoor work stops at dusk and starts again at dawn; the
+	# factor is normalised so a whole day's output is unchanged, which makes
+	# this a redistribution rather than a tax. Thinking is not on the list -
+	# elders can talk in the dark.
+	if Balance.NIGHT_TRADES.has(kind):
+		m *= Balance.night_factor(day, _night_floor())
 	return m
+
+
+## How much work can carry on after dark. A fire is the first answer to that
+## question and, for now, the only one.
+func _night_floor() -> float:
+	if int(buildings.get("firepit", 0)) > 0:
+		return Balance.NIGHT_FLOOR_FIREPIT
+	return Balance.NIGHT_FLOOR
 
 
 func _tile_avg(total: float) -> float:
@@ -1805,8 +1872,8 @@ func _ore_per_worker() -> float:
 # --- Population -------------------------------------------------------------
 
 func _consume_and_grow(dt: float) -> void:
-	var food_need := population * Balance.FOOD_PER_PERSON_PER_DAY * dt
-	var water_need := population * Balance.WATER_PER_PERSON_PER_DAY * dt
+	var food_need := eaters() * Balance.FOOD_PER_PERSON_PER_DAY * dt
+	var water_need := eaters() * Balance.WATER_PER_PERSON_PER_DAY * dt
 
 	var food_got := minf(resources["food"], food_need)
 	var water_got := minf(resources["water"], water_need)
@@ -1829,19 +1896,39 @@ func _consume_and_grow(dt: float) -> void:
 		birth_mult *= float(Balance.DECREES[decree].get("birth_mult", 1.0))
 	if day < festival_until:
 		birth_mult *= Balance.FESTIVAL_BIRTH_MULT
-	births_per_day = Balance.BIRTH_RATE_MAX * population * fertility * crowd * birth_mult
+	# Births come from the people who can have them, not from the headcount. A
+	# civilisation of children and pensioners does not grow, which is the whole
+	# reason the age bands exist.
+	var fertile := 0.0
+	for c in range(Balance.WORK_START_COHORT, Balance.WORK_START_COHORT + 6):
+		if c < Balance.COHORT_COUNT:
+			fertile += cohorts[c]
+	births_per_day = Balance.BIRTH_RATE_MAX * fertile * Balance.BIRTHS_PER_FERTILE \
+			* fertility * crowd * birth_mult
 	var crowd_death := 0.0
 	if population > housing and housing > 0.0:
 		crowd_death = 0.012 * (population / housing - 1.0)
-	deaths_per_day = (Balance.DEATH_RATE_BASE
-			+ Balance.DEATH_RATE_STARVATION * pow(1.0 - need_score, 2.0)
-			+ crowd_death) * population
+
+	# Everyone gets a year older and the life table takes its share. This
+	# replaces the old flat death rate entirely: people now die of being old,
+	# which means a workforce has to be replaced rather than merely accumulated.
+	_age_and_die(dt, need_score)
+	if crowd_death > 0.0:
+		_scale_cohorts(maxf(0.0, 1.0 - crowd_death * dt))
+	deaths_per_day += crowd_death * population
+
+	# Newborns.
+	cohorts[0] += births_per_day * dt
+	_sync_population()
 
 	# The floor under everything. However bad a stretch gets, the settlement
 	# holds and the line turns back up. Hunger costs the player time and
 	# momentum, never their civilisation.
 	var floor_pop := maxf(Balance.MIN_POPULATION, peak_population * Balance.PEAK_FLOOR_FRACTION)
-	population = maxf(floor_pop, population + (births_per_day - deaths_per_day) * dt)
+	if population < floor_pop and population > 0.0:
+		# Hold the line by keeping more of everyone, rather than by conjuring
+		# adults - so the floor never quietly repairs the age structure too.
+		_scale_cohorts(floor_pop / population)
 	# The high-water mark only rises while the people are actually fed. Without
 	# that condition a summer spike set a permanent floor, winter could not
 	# correct it, and the safety net ended up holding nine thousand people on
@@ -1850,8 +1937,8 @@ func _consume_and_grow(dt: float) -> void:
 	if food_satisfaction > 0.95 and water_satisfaction > 0.95:
 		peak_population = maxf(peak_population, population)
 
-	rates["food"] = production["food"] - population * Balance.FOOD_PER_PERSON_PER_DAY
-	rates["water"] = production["water"] - population * Balance.WATER_PER_PERSON_PER_DAY
+	rates["food"] = production["food"] - eaters() * Balance.FOOD_PER_PERSON_PER_DAY
+	rates["water"] = production["water"] - eaters() * Balance.WATER_PER_PERSON_PER_DAY
 	for id in ["wood", "stone", "hides", "ore", "gold", "knowledge"]:
 		rates[id] = production[id]
 
@@ -1860,9 +1947,9 @@ func _consume_and_grow(dt: float) -> void:
 	# work assignment happens to look like, so do not read a misleading zero.
 	var k_food: float = production["food"] / Balance.FOOD_PER_PERSON_PER_DAY
 	var k_water: float = production["water"] / Balance.WATER_PER_PERSON_PER_DAY
-	if resources["food"] > population * Balance.FOOD_PER_PERSON_PER_DAY * 2.0:
+	if resources["food"] > eaters() * Balance.FOOD_PER_PERSON_PER_DAY * 2.0:
 		k_food = maxf(k_food, population)
-	if resources["water"] > population * Balance.WATER_PER_PERSON_PER_DAY * 2.0:
+	if resources["water"] > eaters() * Balance.WATER_PER_PERSON_PER_DAY * 2.0:
 		k_water = maxf(k_water, population)
 	carrying_capacity = minf(minf(k_food, k_water), housing)
 
@@ -1908,8 +1995,137 @@ func _check_milestones(offline: bool) -> void:
 
 # --- Jobs -------------------------------------------------------------------
 
+# --- Age structure ----------------------------------------------------------
+
+## Lay out a starting band. Six people who have just walked out of somewhere are
+## not a random slice of a life table - they are adults with a couple of
+## children, which is what a founding party is.
+func _seed_cohorts(total: float) -> void:
+	cohorts = PackedFloat32Array()
+	cohorts.resize(Balance.COHORT_COUNT)
+	# Weighted hard toward working age: the people who walk out of somewhere
+	# looking for new country are adults, with a couple of children between them.
+	const SHAPE := {0: 0.06, 1: 0.05, 3: 0.16, 4: 0.24, 5: 0.22, 6: 0.15, 7: 0.08, 9: 0.04}
+	for c in Balance.COHORT_COUNT:
+		cohorts[c] = total * float(SHAPE.get(c, 0.0))
+	_sync_population()
+
+
+## `population` is the sum of the bands, always. Anything that moves one has to
+## come back through here or the two drift apart and every downstream number -
+## food needed, housing, carrying capacity - is quietly wrong.
+func _sync_population() -> void:
+	var t := 0.0
+	for c in Balance.COHORT_COUNT:
+		t += cohorts[c]
+	population = t
+
+
+## Add or remove people while keeping the age profile intact. Used by events,
+## migrants and the cheats - all of which used to just move `population` and
+## would now desynchronise it from the bands.
+func _scale_cohorts(factor: float) -> void:
+	for c in Balance.COHORT_COUNT:
+		cohorts[c] *= factor
+	_sync_population()
+
+
+## Newcomers arrive as a plausible band of people rather than as babies.
+func _add_people(count: float) -> void:
+	if count <= 0.0:
+		return
+	const SHAPE := {0: 0.14, 1: 0.10, 2: 0.08, 3: 0.14, 4: 0.16, 5: 0.14, 6: 0.10,
+			7: 0.07, 8: 0.04, 9: 0.03}
+	for c in Balance.COHORT_COUNT:
+		cohorts[c] += count * float(SHAPE.get(c, 0.0))
+	_sync_population()
+
+
+## A year of living, scaled to the substep: people age up through the bands, and
+## each band loses its share to the life table.
+func _age_and_die(dt: float, need_score: float) -> void:
+	var years := dt * Balance.LIFE_YEARS_PER_DAY
+	# What fraction of each band moves up. Five-year bands, so a year moves a
+	# fifth of the people in one.
+	var advance := clampf(years / Balance.COHORT_YEARS, 0.0, 1.0)
+
+	# Hunger multiplies the whole table rather than adding its own term, so a
+	# famine takes the very young and the very old first.
+	var hunger := 1.0 + (Balance.STARVATION_MORTALITY_MULT - 1.0) \
+			* pow(clampf(1.0 - need_score, 0.0, 1.0), 2.0)
+
+	var aged := 0.0
+	var starved := 0.0
+	# Walk downward so people cannot age through two bands in one step.
+	for c in range(Balance.COHORT_COUNT - 1, -1, -1):
+		var here := cohorts[c]
+		if here <= 0.0:
+			continue
+		var rate := Balance.COHORT_MORTALITY[c] + Balance.RANDOM_DEATH_ANNUAL
+		var died := here * clampf(rate * hunger * years, 0.0, 1.0)
+		cohorts[c] = here - died
+		# Attribute it: what the table would have taken anyway is age, the rest
+		# is the famine. The distinction is what makes the readout worth having.
+		var base := here * clampf(rate * years, 0.0, 1.0)
+		aged += base
+		starved += maxf(0.0, died - base)
+
+		var moving := cohorts[c] * advance
+		cohorts[c] -= moving
+		if c + 1 < Balance.COHORT_COUNT:
+			cohorts[c + 1] += moving
+		# Whatever ages out of the last band has died of being very old.
+		else:
+			aged += moving
+
+	deaths_age += aged
+	deaths_hunger += starved
+	deaths_per_day = (aged + starved) / maxf(dt, 0.0001)
+	_sync_population()
+
+
+## Everyone of working age. Children and the very old are fed but not counted
+## on, which is why a population boom costs before it pays.
 func workforce() -> int:
-	return int(floor(population))
+	var n := 0.0
+	for c in range(Balance.WORK_START_COHORT, Balance.WORK_END_COHORT + 1):
+		n += cohorts[c]
+	return int(floor(n))
+
+
+## People too young to work.
+func children() -> float:
+	var n := 0.0
+	for c in Balance.WORK_START_COHORT:
+		n += cohorts[c]
+	return n
+
+
+## People past working age. They can still think, which is most of why they are
+## worth feeding, but they are not in the labour pool.
+func retired() -> float:
+	var n := 0.0
+	for c in range(Balance.WORK_END_COHORT + 1, Balance.COHORT_COUNT):
+		n += cohorts[c]
+	return n
+
+
+## How many full rations the settlement actually eats, as opposed to how many
+## people it holds. Children and pensioners eat less than a labourer.
+func eaters() -> float:
+	return children() * Balance.FOOD_PER_CHILD \
+			+ float(workforce()) \
+			+ retired() * Balance.FOOD_PER_RETIRED
+
+
+## Mean age of everybody alive, for the interface and for the soak.
+func mean_age() -> float:
+	var total := 0.0
+	var weighted := 0.0
+	for c in Balance.COHORT_COUNT:
+		total += cohorts[c]
+		weighted += cohorts[c] * (float(c) + 0.5) * Balance.COHORT_YEARS
+	return weighted / maxf(total, 0.0001)
 
 
 func assigned_total() -> int:
@@ -2062,9 +2278,9 @@ func _well_stocked(id: String) -> bool:
 		"knowledge":
 			return false
 		"food":
-			return resources["food"] >= population * Balance.FOOD_PER_PERSON_PER_DAY * 25.0
+			return resources["food"] >= eaters() * Balance.FOOD_PER_PERSON_PER_DAY * 25.0
 		"water":
-			return resources["water"] >= population * Balance.WATER_PER_PERSON_PER_DAY * 12.0
+			return resources["water"] >= eaters() * Balance.WATER_PER_PERSON_PER_DAY * 12.0
 	if _stock_targets.is_empty():
 		_recompute_stock_targets()
 	return resources[id] >= float(_stock_targets.get(id, Balance.STOCK_TARGET_FLOOR))
@@ -2111,7 +2327,7 @@ func _auto_assign_jobs() -> void:
 
 	# --- 1. Water. Push harder when the jars are nearly dry, ease off when full.
 	var y_water := job_yield_planned("water_carrier")
-	var draw := population * Balance.WATER_PER_PERSON_PER_DAY
+	var draw := eaters() * Balance.WATER_PER_PERSON_PER_DAY
 	var water_days: float = resources["water"] / maxf(draw, 0.01)
 	var water_target := draw
 	if water_days > 4.0:
@@ -2146,7 +2362,7 @@ func _auto_assign_jobs() -> void:
 		wf = y_forage * y_forage * float(job_weights.get("forager", 1.0))
 	var wsum := wh + wf
 
-	var eat := population * Balance.FOOD_PER_PERSON_PER_DAY
+	var eat := eaters() * Balance.FOOD_PER_PERSON_PER_DAY
 	var food_days: float = resources["food"] / maxf(eat, 0.01)
 	var food_target := eat * 1.25
 	if food_days > 12.0:
@@ -2273,7 +2489,11 @@ func _auto_assign_jobs() -> void:
 			# Capped. Everyone spare becoming an elder turned knowledge into a
 			# second runaway - and a settlement where four in five people are
 			# thinking is not a settlement.
-			var think_cap := maxi(1, int(float(total) * 0.35))
+			# A fifth, not a third. At the old cap a soak found elders pinned at
+			# thirty-five per cent of everyone for the whole run - a settlement
+			# where one person in three sits and thinks is not a settlement, and
+			# it read as a bug rather than as a strategy.
+			var think_cap := maxi(1, int(float(total) * Balance.THINKER_CAP_SHARE))
 			var take := clampi(think_cap - int(jobs.get("thinker", 0)), 0, left)
 			jobs["thinker"] = int(jobs.get("thinker", 0)) + take
 			left -= take
@@ -3127,11 +3347,11 @@ func _maybe_event(dt: float) -> void:
 			_scale_stock(world.game, world.game_cap, 0.72)
 			add_log(e["text"], "bad")
 		"sickness":
-			population = maxf(Balance.MIN_POPULATION, population * 0.94)
+			_scale_cohorts(0.94)
 			add_log(e["text"], "bad")
 		"migrants":
 			var joiners := Balance.migrant_count(population)
-			population += joiners
+			_add_people(joiners)
 			add_log("%s %s of them join the band." % [e["text"], Balance.fmt_count(joiners)], "good")
 		"windfall":
 			resources["wood"] += 25.0 + population
@@ -3194,6 +3414,9 @@ func to_dict() -> Dictionary:
 		"day": day,
 		"population": population,
 		"peak_population": peak_population,
+		"cohorts": Array(cohorts),
+		"deaths_age": deaths_age,
+		"deaths_hunger": deaths_hunger,
 		# Saved so a reloaded game continues the same sequence of events
 		# rather than forking into a different one at every load.
 		"rng_state": str(rng.state),
@@ -3260,6 +3483,17 @@ func from_dict(d: Dictionary) -> void:
 	day = float(d.get("day", 0.0))
 	population = float(d.get("population", 6.0))
 	peak_population = maxf(population, float(d.get("peak_population", population)))
+	deaths_age = float(d.get("deaths_age", 0.0))
+	deaths_hunger = float(d.get("deaths_hunger", 0.0))
+	# Saves from before the age bands existed have only a headcount, so give
+	# them a plausible profile rather than a population of newborns.
+	var saved_cohorts: Array = d.get("cohorts", [])
+	if saved_cohorts.size() == Balance.COHORT_COUNT:
+		for c in Balance.COHORT_COUNT:
+			cohorts[c] = float(saved_cohorts[c])
+		_sync_population()
+	else:
+		_seed_cohorts(population)
 	run_salt = int(d.get("run_salt", 0))
 	var rs := String(d.get("rng_state", ""))
 	if rs.is_valid_int():

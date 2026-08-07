@@ -72,6 +72,11 @@ const WATER_PER_PERSON_PER_DAY := 0.5
 ## the game this is. Slack means the granary fills, winter is survived out of
 ## store rather than out of the safety net, and growth feels like abundance.
 const BIRTH_RATE_MAX := 0.021
+## Births are now counted against the people who can actually have them - the
+## six bands from fifteen to forty-four - rather than against the whole
+## headcount. That is roughly two fifths of a settled population, so the rate
+## above is scaled back up by the reciprocal to leave the old balance intact.
+const BIRTHS_PER_FERTILE := 2.45
 ## Baseline mortality, always present.
 const DEATH_RATE_BASE := 0.010
 ## Extra mortality when the tribe goes short. Deliberately gentle: hunger
@@ -88,6 +93,76 @@ const MIN_POPULATION := 4.0
 const PEAK_FLOOR_FRACTION := 0.75
 ## Below this fraction of need, the log starts mentioning hunger.
 const FAMINE_THRESHOLD := 0.85
+
+## --- Age structure ----------------------------------------------------------
+## Population used to be one number, so everybody was a worker for ever and
+## nobody was ever born young or died old. People now live in five-year bands
+## from birth to a hundred: births enter the first, everyone shuffles up as the
+## years pass, and each band has its own chance of not making it to the next.
+##
+## Two things fall out of this that no multiplier could give. A civilisation
+## that has just grown hard is full of children and cannot work them, so a
+## population boom costs before it pays. And people die of being old, which
+## means the workforce has to be *replaced* rather than merely accumulated.
+## How much of a human life passes in one game day.
+##
+## This is the one place the game admits that its two clocks are different. The
+## seasonal year is 360 days, because seasons have to feel like seasons. But a
+## run spans nine eras from a nomadic band to the industrial dawn - thousands of
+## years of history - in a few thousand days, and if people aged at one year per
+## 360 days then a child born on day one would reach working age on day five
+## thousand four hundred, long after the run was over. The first attempt did
+## exactly that and the population froze at fifteen: every birth was a child who
+## would never grow up, and the five founding adults were the workforce for ever.
+##
+## So lives run on the civilisational clock rather than the seasonal one. At a
+## fifth of a year per day a person matures in seventy-five days and dies of old
+## age around day four hundred, which gives a two-thousand-day run about five
+## generations - enough that the player watches the age structure move.
+const LIFE_YEARS_PER_DAY := 0.2
+
+const COHORT_YEARS := 5.0
+const COHORT_COUNT := 20  # 0-4 up to 95-99
+## The working ages. Below the first you are a child; above the last you are
+## kept rather than counted on.
+const WORK_START_COHORT := 3   # 15
+const WORK_END_COHORT := 12    # 64
+## Elders can still think even when they cannot dig, which is most of why the
+## last cohorts are worth feeding.
+const ELDER_START_COHORT := 13 # 65+
+
+## Annual mortality per band, roughly a US life table flattened to five-year
+## bands: high in infancy, a long flat valley through working life, then the
+## steep climb. Life expectancy comes out near seventy-eight, which is where the
+## United States currently sits.
+const COHORT_MORTALITY: Array[float] = [
+	0.0055, 0.0003, 0.0004, 0.0008, 0.0012, 0.0014, 0.0017, 0.0022,
+	0.0031, 0.0045, 0.0068, 0.0104, 0.0159, 0.0242, 0.0380, 0.0620,
+	0.1030, 0.1720, 0.2800, 0.4500,
+]
+## Nobody survives past the last band; whatever is left in it goes each year.
+const MAX_AGE_MORTALITY := 1.0
+
+## On top of the life table, a flat chance of dying for reasons the simulation
+## does not model - an accident, a bad winter, a fall. Deliberately tiny: it is
+## there so that death is never impossible at any age, not to be a threat.
+const RANDOM_DEATH_ANNUAL := 0.0009
+
+## Starvation multiplies the whole table rather than adding a separate term, so
+## a famine kills the very young and the very old first, which is both true and
+## the more interesting outcome.
+const STARVATION_MORTALITY_MULT := 5.0
+
+## A child does not eat what a labourer eats, and neither does a pensioner.
+##
+## This is not decoration - it is what makes the age structure survivable. The
+## first version had everyone eating a full ration while only the middle bands
+## could work, so a band of six had five workers feeding nine mouths and simply
+## stopped growing at nine, for ever. Weighting consumption by age puts the
+## ratio back where the rest of the balance expects it, and does it in the way
+## that is actually true rather than by pretending children can dig.
+const FOOD_PER_CHILD := 0.55
+const FOOD_PER_RETIRED := 0.80
 
 ## How many people a wandering band is worth when it joins you.
 ##
@@ -116,19 +191,31 @@ static func migrant_count(population: float) -> float:
 	return minf(band, maxf(2.0, population * MIGRANT_MAX_FRACTION))
 
 # --- Ecology (Rosenzweig-MacArthur / Holling type II) -----------------------
+## The wild stocks are the early game. Hunting and foraging are what a band of
+## six actually lives on, and how fast they grow for the first hour is entirely
+## a question of how much game there is and how well they take it.
+##
+## A ten-thousand-day soak found the herds sitting at exactly thirty per cent -
+## the refuge floor, to the decimal - for the whole run. That is not an
+## equilibrium, it is a wall: the refugia constant exists so nothing is ever
+## wiped out, and it was instead the only thing holding the entire wild-game
+## economy up. Herds regrow considerably faster now and wander in from outside
+## considerably harder, so the stock finds a real level well above the floor,
+## and hunters take from it harder in exchange - which is what makes the early
+## band grow on the hunt rather than in spite of it.
 ## Intrinsic regrowth rate of wild game, per day.
-const GAME_REGROWTH := 0.100
+const GAME_REGROWTH := 0.190
 ## Attack rate: how effectively one hunter finds game.
-const HUNT_ATTACK_RATE := 0.030
+const HUNT_ATTACK_RATE := 0.046
 ## Handling time: the saturation term that caps yield when game is abundant.
-const HUNT_HANDLING_TIME := 0.42
+const HUNT_HANDLING_TIME := 0.38
 ## Wild game wanders in from beyond the territory, so the herds always recover.
-const GAME_IMMIGRATION := 0.300
+const GAME_IMMIGRATION := 0.620
 
-const FORAGE_REGROWTH := 0.300
-const FORAGE_ATTACK_RATE := 0.100
-const FORAGE_HANDLING_TIME := 0.62
-const FORAGE_IMMIGRATION := 0.600
+const FORAGE_REGROWTH := 0.480
+const FORAGE_ATTACK_RATE := 0.140
+const FORAGE_HANDLING_TIME := 0.58
+const FORAGE_IMMIGRATION := 1.000
 
 ## Trees regrow slower than anything else, but they do regrow.
 const FOREST_REGROWTH := 0.050
@@ -139,7 +226,14 @@ const FOREST_IMMIGRATION := 0.100
 ## Refugia: this fraction of every stock is simply out of reach - deep
 ## thickets, high ground, the far bank. Nothing is ever hunted or felled to
 ## nothing, so every stock always keeps a seed to grow back from.
-const STOCK_REFUGE := 0.30
+##
+## Raised from 0.30 because a long soak found every world sitting at exactly
+## thirty per cent for its whole life: the refuge was not a safety net under a
+## living population, it *was* the population. A higher floor means more
+## standing game and timber at equilibrium - which is visible, since the number
+## of animals drawn on a tile is the number of animals on it - and it keeps
+## hunting worth doing rather than leaving it a trade that dies at hour one.
+const STOCK_REFUGE := 0.40
 
 ## Felling forest costs wildlife some habitat, but never all of it.
 const HABITAT_WEIGHT := 0.30
@@ -153,6 +247,7 @@ const KNOWLEDGE_PER_THINKER := 0.22
 ## Elders have diminishing returns to headcount. See the note in Sim._produce -
 ## this exponent is what stops population and knowledge feeding each other into
 ## a run that finishes the tech tree in a quarter of an hour.
+const THINKER_CAP_SHARE := 0.20
 const THINKER_EXPONENT := 0.58
 ## Ambient learning: even with nobody assigned, a bigger tribe accumulates
 ## know-how. Scales with sqrt(pop) so it never outruns dedicated thinkers.
@@ -1188,6 +1283,39 @@ const LATITUDE_DEG := 47.6
 const DAYLIGHT_MIN_HOURS := 7.5
 const DAYLIGHT_MAX_HOURS := 16.5
 
+## --- Night work -------------------------------------------------------------
+## People sleep. Everything that means being outside and able to see - hunting,
+## foraging, felling, scouting, the fields, a building site - stops at dusk and
+## starts again at dawn.
+##
+## This is a *redistribution*, not a penalty. The factor is normalised so that a
+## whole day's output is unchanged: the same work now happens in fewer, busier
+## hours. What that buys is a reason for the long nights of a northern winter to
+## bite, and a reason for light to be worth having - because the only way to
+## raise the daily total is to raise NIGHT_FLOOR, which is exactly what a fire
+## and later a lamp do.
+const NIGHT_TRADES := ["game", "forage", "forest", "timber", "farm", "explore",
+		"build", "stone", "water"]
+## What can still be done in the dark, before any light is brought to bear.
+const NIGHT_FLOOR := 0.18
+## A fire pit lets a little work carry on after dark. Electric light, when it
+## comes, will go here too.
+const NIGHT_FLOOR_FIREPIT := 0.30
+
+
+## How productive a trade is right now, given where the sun is. Averages to 1.0
+## across a full day by construction, so this moves work around within the day
+## rather than removing it.
+static func night_factor(day: float, floor_value: float) -> float:
+	var sun := sun_elevation(day)
+	var here := floor_value + (1.0 - floor_value) * sun
+	# Mean of sin over the daylight arc is 2/pi, and it is dark the rest of the
+	# time - so this is the day's average of the expression above.
+	var lit := daylight_hours(day) / 24.0
+	var mean := floor_value + (1.0 - floor_value) * (2.0 / PI) * lit
+	return here / maxf(mean, 0.0001)
+
+
 ## Below this the ground freezes: precipitation falls as snow and lies.
 const FREEZING_C := 0.0
 ## Centimetres of snow laid down per day of snowfall.
@@ -1284,7 +1412,6 @@ const SETTLEMENT_POP_THRESHOLDS: Array[float] = [
 ## eligibility check, not a price: you must have a real store before you can
 ## spend a share of it.
 const SETTLEMENT_COST_FRACTION := {"wood": 0.55, "food": 0.40}
-const SETTLEMENT_BASE_COST := {"wood": 250.0, "food": 400.0}
 ## No settlement may cost more than this share, however many you have founded.
 const SETTLEMENT_MAX_FRACTION := 0.85
 const SETTLEMENT_COST_GROWTH := 1.40
@@ -1300,6 +1427,36 @@ const SETTLEMENT_TECH_SHARE := 0.6
 const SETTLEMENT_HOUSING := 140.0
 ## How much of the surrounding ground a settlement works, against an outpost's.
 const SETTLEMENT_YIELD_SCALE := 2.6
+
+## --- Ore deposits -----------------------------------------------------------
+## Ore used to be a smooth field: every hill had a little, every mountain more,
+## and prospecting was a technology rather than an activity. Deposits are
+## discrete now - a few dozen real seams scattered through the high ground,
+## hidden until somebody finds one.
+##
+## Finding them is what explorers and miners do besides their day job, so the
+## map keeps producing news long after it has been walked. That matters most in
+## the stretch the soak found dead: the ore tiers all arrive by day 500, and a
+## strike is then the only thing that still happens underground.
+const DEPOSIT_COUNT_MIN := 22
+const DEPOSIT_COUNT_MAX := 38
+## How much ore a struck seam adds, over the tiles around it.
+const DEPOSIT_RICHNESS_MIN := 3.0
+const DEPOSIT_RICHNESS_MAX := 11.0
+const DEPOSIT_RADIUS := 2
+## Daily chance of a find. Explorers are better at it than miners because they
+## are the ones looking at ground nobody has seen.
+##
+## Scaled by the *square root* of the headcount, not the headcount. A first pass
+## used a flat rate per worker and a soak struck all thirty-six seams inside two
+## thousand days - once there are three hundred miners, a linear rate makes
+## discovery a certainty every few days rather than news. Sub-linear means a
+## bigger civilisation finds more, but finding is always a matter of luck rather
+## than of payroll.
+const DEPOSIT_FIND_PER_EXPLORER := 0.0016
+const DEPOSIT_FIND_PER_MINER := 0.0006
+## Nothing is found on ground nobody has walked.
+const DEPOSIT_NEEDS_EXPLORED := true
 
 ## --- Roads ------------------------------------------------------------------
 ## Two settlements whose claimed ground touches are neighbours, and neighbours
