@@ -31,6 +31,7 @@ var _pop_label: Label
 var _fps_label: Label
 var _season_label: Label
 var _weather_label: Label
+var _temp_label: Label
 var _speed_buttons: Array[Button] = []
 
 # Panels
@@ -276,6 +277,8 @@ func _build_top_bar() -> Control:
 	row.add_child(_season_label)
 	_weather_label = _text("", 13, MUTED)
 	row.add_child(_weather_label)
+	_temp_label = _text("", 12, MUTED)
+	row.add_child(_temp_label)
 
 	_speed_buttons.clear()
 	for i in Balance.SPEEDS.size():
@@ -1098,6 +1101,20 @@ func _refresh_top() -> void:
 	_weather_label.add_theme_color_override("font_color", wx["color"])
 	_weather_label.tooltip_text = String(wx["note"])
 
+	# Temperature, the clock's companion: the same two cosines that decide
+	# whether snow lies also decide whether it is a pleasant afternoon.
+	var c := Sim.temperature()
+	_temp_label.text = "%.0f C / %.0f F" % [c, Sim.temperature_f()]
+	_temp_label.add_theme_color_override("font_color",
+			Color("7fb8e0") if c < 4.0 else (Color("e0a45f") if c > 20.0 else MUTED))
+	var sky := "night" if Sim.is_night() else "day"
+	_temp_label.tooltip_text = ("Sunrise %s, sunset %s - currently %s.\n"
+			% [Balance.fmt_hour(Balance.sunrise_hour(Sim.day)),
+			Balance.fmt_hour(Balance.sunset_hour(Sim.day)), sky]
+			+ "Reference climate is Seattle: 47.6 north, mild and wet.")
+	if Sim.snow_depth > 0.5:
+		_temp_label.text += "   %.0fcm snow" % Sim.snow_depth
+
 
 func _refresh_resources() -> void:
 	for id in Balance.RESOURCE_ORDER:
@@ -1785,6 +1802,46 @@ func _open_settings() -> void:
 	v.add_child(_wrapped("Settlement points are normally earned by growing - the first at "
 			+ "%s people. This hands you one now so the system can be tried out."
 			% Balance.fmt_count(float(Balance.SETTLEMENT_POP_THRESHOLDS[0]))))
+
+	# How much to hand over. One box drives both buttons, because the useful
+	# question is nearly always "give me enough of everything to try the thing"
+	# rather than a per-resource negotiation.
+	var amount_row := HBoxContainer.new()
+	amount_row.add_theme_constant_override("separation", 8)
+	amount_row.add_child(_text("Amount", 13, MUTED))
+	var amount := SpinBox.new()
+	amount.min_value = 1
+	amount.max_value = 1_000_000_000
+	amount.step = 100
+	amount.value = 1000
+	amount.custom_minimum_size.x = 150
+	amount_row.add_child(amount)
+	v.add_child(amount_row)
+
+	var give_row := HBoxContainer.new()
+	give_row.add_theme_constant_override("separation", 8)
+	var gave := _text("", 12, GOOD)
+
+	var give_res := Button.new()
+	give_res.text = "Add to every resource"
+	give_res.pressed.connect(func() -> void:
+		Sim.cheat_add_resources(amount.value)
+		gave.text = "+%s of each" % Balance.fmt_count(amount.value)
+		_dirty = true)
+	give_row.add_child(give_res)
+
+	var give_pop := Button.new()
+	give_pop.text = "Add people"
+	give_pop.pressed.connect(func() -> void:
+		Sim.cheat_add_population(amount.value)
+		gave.text = "%s people" % Balance.fmt_count(Sim.population)
+		_dirty = true)
+	give_row.add_child(give_pop)
+	give_row.add_child(gave)
+	v.add_child(give_row)
+	v.add_child(_wrapped("Knowledge is included, so this will also unlock research. Added "
+			+ "people raise the high-water mark straight away, so the never-lose floor "
+			+ "will hold them there even if the land cannot feed them yet."))
 
 	v.add_child(_heading("ARTWORK"))
 	var reset_row := HBoxContainer.new()

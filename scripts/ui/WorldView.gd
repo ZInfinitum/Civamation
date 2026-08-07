@@ -65,6 +65,9 @@ const MAX_WORKER_MARKS := 420
 const CLOUD_MAX := 26
 ## Tiles a cloud crosses per in-game day.
 const CLOUD_DRIFT_PER_DAY := 1.4
+## How dark the deepest part of the night gets. Not black - you still have to be
+## able to read the map at three in the morning.
+const NIGHT_MAX_DARKNESS := 0.62
 
 var zoom: float = 13.0
 var camera := Vector2.ZERO  ## in tile coordinates
@@ -191,9 +194,12 @@ func _process(delta: float) -> void:
 	# Clouds move with the in-game day, so they need a redraw cadence of their
 	# own - the ordinary dirty flag fires on material changes and once a second,
 	# which would make them judder across the sky.
-	if not Settings.reduce_motion and float(Sim.weather_info()["clouds"]) > 0.01:
+	# Clouds drift and the light changes through the day, both continuously, so
+	# they need a redraw cadence of their own - the ordinary dirty flag fires on
+	# material changes and once a second, which would make both of them judder.
+	if float(Sim.weather_info()["clouds"]) > 0.01 or Sim.sun_elevation() < 0.6:
 		_cloud_accum += delta
-		if _cloud_accum >= 0.066:
+		if _cloud_accum >= (0.25 if Settings.reduce_motion else 0.066):
 			_cloud_accum = 0.0
 			_dirty = true
 
@@ -495,10 +501,15 @@ func draw_overlay() -> void:
 	if filter == Balance.MapFilter.TERRITORY:
 		_draw_territory_overlay(world, x0, y0, x1, y1)
 
-	# Territory ring.
+	# Territory: one ring per claim, because territory is a union of circles now
+	# rather than a single one around the capital.
 	var home := _tile_to_screen(Vector2(world.origin))
 	_draw_territory_ring(home, world.territory_radius)
+	for s in Sim.settlements:
+		_draw_territory_ring(_tile_to_screen(Vector2(world.tile_pos(int(s["tile"])))),
+				Sim.settlement_radius())
 
+	_draw_roads(world)
 	_draw_settlement(home)
 	if zoom >= DETAIL_ZOOM:
 		_draw_workers(world)
@@ -507,6 +518,7 @@ func draw_overlay() -> void:
 		_draw_placement(world)
 	_draw_boon(world)
 	_draw_clouds()
+	_draw_night(world)
 	_draw_legend()
 
 
@@ -913,7 +925,6 @@ func _draw_outposts(world: CivWorld) -> void:
 		if p.x < -40.0 or p.y < -40.0 or p.x > size.x + 40.0 or p.y > size.y + 40.0:
 			continue
 		var s := maxf(zoom, 8.0) * 1.35
-		_draw_territory_ring(p, Balance.SETTLEMENT_TERRITORY)
 		var tex := Art.ui("settlement")
 		if tex != null:
 			Art.draw_centred(_overlay, tex, p, s)
@@ -998,6 +1009,85 @@ func _draw_boon(world: CivWorld) -> void:
 	# The inner arc empties as the moment passes.
 	_overlay.draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
 	_overlay.draw_circle(centre, r * 0.22, col)
+
+
+## Night, and the lights people keep against it.
+##
+## Drawn last, over everything, because night falls on the whole country at
+## once. The darkness is one rect keyed to how high the sun is - dusk and dawn
+## come on gradually, which is most of what sells it - and then every place
+## people live burns a fire in it.
+##
+## The bloom is three concentric circles at low alpha rather than a real shader
+## pass: additive blending on a handful of circles reads as glow at a fraction
+## of the cost, and it is the same trick whether it is a campfire now or a
+## street lamp once there is electricity to run one.
+func _draw_night(world: CivWorld) -> void:
+	var sun := Sim.sun_elevation()
+	if sun >= 0.55:
+		return
+	# Deepest an hour after dusk, easing off through twilight.
+	var dark := clampf(1.0 - sun / 0.55, 0.0, 1.0)
+	var night := dark * dark * NIGHT_MAX_DARKNESS
+	_overlay.draw_rect(Rect2(Vector2.ZERO, size), Color(0.04, 0.06, 0.13, night))
+	if night < 0.06:
+		return
+
+	# Firelight. Brighter the darker it is, so the village emerges as dusk
+	# deepens rather than snapping on.
+	var glow := dark
+	var lit: Array[Vector2] = [_tile_to_screen(Vector2(world.origin))]
+	for s in Sim.settlements:
+		lit.append(_tile_to_screen(Vector2(world.tile_pos(int(s["tile"])))))
+	for o in Sim.outposts:
+		lit.append(_tile_to_screen(Vector2(world.tile_pos(int(o["tile"])))))
+
+	# A settlement with a fire pit burns a bigger one, and a bigger place burns
+	# more of them - so the map at night is a readable picture of where people
+	# actually are.
+	var base := maxf(zoom * 1.6, 22.0)
+	if Sim.buildings.get("firepit", 0) > 0:
+		base *= 1.25
+	var warm := Color(1.0, 0.62, 0.24)
+	for i in lit.size():
+		var p: Vector2 = lit[i]
+		if p.x < -base * 3.0 or p.x > size.x + base * 3.0:
+			continue
+		if p.y < -base * 3.0 or p.y > size.y + base * 3.0:
+			continue
+		# The capital is the big fire; the others are smaller.
+		var r := base if i == 0 else base * 0.62
+		for ring in 3:
+			var t := float(ring + 1) / 3.0
+			_overlay.draw_circle(p, r * t * 1.5,
+					Color(warm.r, warm.g, warm.b, glow * 0.16 * (1.0 - t) + 0.02))
+		_overlay.draw_circle(p, maxf(2.0, r * 0.16),
+				Color(1.0, 0.86, 0.55, minf(0.95, 0.35 + glow * 0.6)))
+
+
+## Roads between places whose claimed ground touches. Nobody places these - they
+## are what two towns within reach of each other do - so the map showing them is
+## the only feedback that siting a settlement close to another was worth it.
+func _draw_roads(world: CivWorld) -> void:
+	var links := Sim.road_links()
+	if links.is_empty():
+		return
+	var info := Sim.road_info()
+	var col: Color = info["color"]
+	var wide := maxf(1.5, zoom * float(info["width"]))
+
+	for l in links:
+		var a := _road_point(world, int(l[0]))
+		var b := _road_point(world, int(l[1]))
+		# A darker casing under the road, so it reads over any terrain.
+		_overlay.draw_line(a, b, Color(0.12, 0.10, 0.08, 0.55), wide * 1.8, true)
+		_overlay.draw_line(a, b, Color(col.r, col.g, col.b, 0.9), wide, true)
+
+
+func _road_point(world: CivWorld, which: int) -> Vector2:
+	if which < 0:
+		return _tile_to_screen(Vector2(world.origin))
+	return _tile_to_screen(Vector2(world.tile_pos(int(Sim.settlements[which]["tile"]))))
 
 
 # --- Weather ----------------------------------------------------------------

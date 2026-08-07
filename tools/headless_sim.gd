@@ -502,7 +502,7 @@ func _test_settlements() -> void:
 				% [walked, far_enough, buildable, afford])
 		return
 
-	var radius_before := Sim.world.territory_radius
+	var claimed_before := Sim.world.territory.size()
 	var housing_before := Sim.housing
 	var points_before := Sim.settlement_points
 	if not Sim.found_settlement(site):
@@ -512,8 +512,8 @@ func _test_settlements() -> void:
 
 	print("earned %d points by day 600; founded one %d tiles out"
 			% [before_points, int(Vector2(Sim.world.tile_pos(site) - Sim.world.origin).length())])
-	print("territory %.1f -> %.1f, housing %s -> %s"
-			% [radius_before, Sim.world.territory_radius,
+	print("claimed tiles %d -> %d, housing %s -> %s"
+			% [claimed_before, Sim.world.territory.size(),
 			Balance.fmt_count(housing_before), Balance.fmt_count(Sim.housing)])
 
 	if Sim.settlement_points != points_before - 1:
@@ -522,8 +522,17 @@ func _test_settlements() -> void:
 		_failures.append("settlements: founded one and there are %d" % Sim.settlements.size())
 	if Sim.housing <= housing_before:
 		_failures.append("settlements: housing did not rise - a settlement is somewhere people live")
-	if Sim.world.territory_radius <= radius_before:
-		_failures.append("settlements: territory did not grow around the new settlement")
+	if Sim.world.territory.size() <= claimed_before:
+		_failures.append("settlements: no new ground claimed around the new settlement")
+	# And the claim must be around the settlement, not around the capital.
+	var here := Sim.world.tile_pos(site)
+	var near := 0
+	for i in Sim.world.territory:
+		if Vector2(Sim.world.tile_pos(i) - here).length() <= Sim.settlement_radius():
+			near += 1
+	if near < 8:
+		_failures.append("settlements: only %d claimed tiles lie near the new settlement - "
+				% near + "the claim is not centred on it")
 	# And it must survive a save.
 	SaveSystem.save_game()
 	Sim.new_game(11111, Balance.WorldType.ISLANDS)
