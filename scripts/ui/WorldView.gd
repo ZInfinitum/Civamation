@@ -789,9 +789,29 @@ func _draw_legend() -> void:
 	var y := size.y - 8.0
 	var shown := 0
 	var per := _people_per_figure()
+	# Backing strip. Terrain sprites brought the map up to full brightness and
+	# the legend became unreadable over grassland and sand - white-ish text on a
+	# pale tile. One flat rect is cheaper than outlining every glyph.
+	var strip := 26.0 if per <= 1.0 else 40.0
+	draw_rect(Rect2(0.0, size.y - strip, size.x, strip), Color(0.05, 0.06, 0.07, 0.72), true)
 	if per > 1.0:
 		draw_string(font, Vector2(x, y - 20.0), "one figure = %s people" % Balance.fmt_count(per),
-				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.6, 0.62, 0.6))
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.72, 0.74, 0.72))
+	# The legend has to answer the question the current filter is asking. Listing
+	# five trades under a map that has deliberately stopped distinguishing trades
+	# is worse than listing nothing.
+	if filter == Balance.MapFilter.PEOPLE:
+		_draw_person(Vector2(x + 7.0, y - 6.0), 60.0, Balance.CROWD_COLOR)
+		draw_string(font, Vector2(x + 17.0, y - 3.0),
+				"%s people" % Balance.fmt_count(Sim.population),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Balance.CROWD_COLOR)
+		return
+	if filter != Balance.MapFilter.TRADES:
+		var info: Dictionary = Balance.MAP_FILTERS[filter]
+		draw_string(font, Vector2(x, y - 3.0), String(info["desc"]),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.78, 0.80, 0.78))
+		return
+
 	for job_id in Balance.JOB_ORDER:
 		if shown >= 5:
 			break

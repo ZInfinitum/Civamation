@@ -240,8 +240,16 @@ func _row(name_text: String) -> Array:
 
 func _build_top_bar() -> Control:
 	var v := _panel()
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
+	# An HBox here forced a minimum width of roughly sixteen hundred logical
+	# pixels - title, era, day, population, five speed buttons, and five more
+	# buttons after them. A container cannot shrink below its children, so the
+	# whole interface was pushed wider than the window and the right-hand tabs
+	# fell off the edge of the screen. Flowing means the bar takes a second line
+	# when it has to, which is also what a Steam Deck and a phone browser need.
+	var row := HFlowContainer.new()
+	row.add_theme_constant_override("h_separation", 12)
+	row.add_theme_constant_override("v_separation", 4)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	v.add_child(row)
 
 	row.add_child(_text("CIVAMATION", 18, ACCENT))
@@ -251,10 +259,6 @@ func _build_top_bar() -> Control:
 	row.add_child(_day_label)
 	_pop_label = _text("", 16, TEXT)
 	row.add_child(_pop_label)
-
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
 
 	_fps_label = _text("", 12, MUTED)
 	row.add_child(_fps_label)
@@ -418,8 +422,12 @@ func _build_center_column() -> Control:
 	p.add_child(_map)
 	outer.add_child(p)
 
-	var bar := HBoxContainer.new()
-	bar.add_theme_constant_override("separation", 6)
+	# Flowing for the same reason the top bar is: two buttons, a dropdown and two
+	# lines of prose do not fit under a narrow map, and the map is the thing that
+	# gets narrow first.
+	var bar := HFlowContainer.new()
+	bar.add_theme_constant_override("h_separation", 6)
+	bar.add_theme_constant_override("v_separation", 2)
 	var home := Button.new()
 	home.text = "Settlement"
 	home.pressed.connect(func() -> void: _map.view_home())
@@ -448,9 +456,6 @@ func _build_center_column() -> Control:
 	_filter_note = _text(String((Balance.MAP_FILTERS[0] as Dictionary)["desc"]), 11, MUTED)
 	bar.add_child(_filter_note)
 
-	var spacer2 := Control.new()
-	spacer2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	bar.add_child(spacer2)
 	bar.add_child(_text("scroll to zoom, drag to pan", 11, MUTED))
 	outer.add_child(bar)
 	return outer
@@ -1378,6 +1383,14 @@ func _open_new_world() -> void:
 ## Read whatever was typed or pasted into the seed box. Accepts a bare number,
 ## the "seed / Shape" line the pause menu copies, or arbitrary words - which are
 ## hashed, so "midsummer" is a perfectly good seed and always the same world.
+## Change the map overlay from outside the interface. The screenshot tool uses
+## it, and going through here keeps the dropdown and the map from disagreeing.
+func set_map_filter(index: int) -> void:
+	index = clampi(index, 0, Balance.MAP_FILTERS.size() - 1)
+	_filter_pick.selected = index
+	_filter_pick.item_selected.emit(index)
+
+
 func _parse_seed(raw: String, fallback_type: int) -> Dictionary:
 	var text := raw.strip_edges()
 	if text.is_empty():

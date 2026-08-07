@@ -82,15 +82,46 @@ func _scan(path: String, category: String) -> void:
 
 
 func _load(path: String) -> Texture2D:
-	# Anything under res:// has been through the import pipeline and is loaded
-	# normally. Anything under user:// has not, so it is read as an image at
-	# runtime - which is exactly what makes dropping a file in work at all.
+	# Under res://, prefer the imported resource: in an exported build that is
+	# the only thing that exists, and it is the compressed, mipmapped one.
+	#
+	# But running from a clean clone there *are* no .import files, because this
+	# project deliberately has no build step and nobody has opened the editor.
+	# ResourceLoader then fails with "no loader found", and every shipped sprite
+	# silently does not exist - which is how the first batch of terrain tiles
+	# came out invisible. So fall through to reading the bytes, exactly as the
+	# user:// path already does.
 	if path.begins_with("res://"):
-		var res := ResourceLoader.load(path)
-		return res as Texture2D if res is Texture2D else null
+		if ResourceLoader.exists(path):
+			var res := ResourceLoader.load(path)
+			if res is Texture2D:
+				return res as Texture2D
+		return _from_bytes(path)
+
+	# user:// has never been through the importer by definition. Reading it at
+	# runtime is exactly what makes dropping a file in work at all.
 	var img := Image.new()
 	if img.load(path) != OK:
 		push_warning("Art: could not read %s" % path)
+		return null
+	return ImageTexture.create_from_image(img)
+
+
+## Decode an image straight out of the file, no import step involved. Works for
+## res:// and user:// alike, and for a res:// path it also works inside a PCK.
+func _from_bytes(path: String) -> Texture2D:
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.is_empty():
+		return null
+	var img := Image.new()
+	var err := FAILED
+	match path.get_extension().to_lower():
+		"png": err = img.load_png_from_buffer(bytes)
+		"webp": err = img.load_webp_from_buffer(bytes)
+		"jpg", "jpeg": err = img.load_jpg_from_buffer(bytes)
+		"svg": err = img.load_svg_from_buffer(bytes)
+	if err != OK:
+		push_warning("Art: could not decode %s" % path)
 		return null
 	return ImageTexture.create_from_image(img)
 

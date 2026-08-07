@@ -18,6 +18,8 @@ func _ready() -> void:
 	var days := DEFAULT_DAYS
 	var out := DEFAULT_OUT
 	var world_seed := DEFAULT_SEED
+	var zoom := 0.0
+	var map_filter := -1
 	var args := OS.get_cmdline_user_args()
 	for i in args.size():
 		if args[i] == "--days" and i + 1 < args.size():
@@ -26,6 +28,10 @@ func _ready() -> void:
 			out = args[i + 1]
 		elif args[i] == "--seed" and i + 1 < args.size():
 			world_seed = int(args[i + 1])
+		elif args[i] == "--zoom" and i + 1 < args.size():
+			zoom = float(args[i + 1])
+		elif args[i] == "--filter" and i + 1 < args.size():
+			map_filter = int(args[i + 1])
 
 	Sim.new_game(world_seed)
 	Sim.simulate_days(days, true)
@@ -33,6 +39,18 @@ func _ready() -> void:
 
 	var hud := HUD.new()
 	add_child(hud)
+	# Terrain sprites and individual figures only draw in past a zoom threshold,
+	# so a shot of the whole world can never show either. Being able to ask for
+	# a close shot is the difference between this tool proving the artwork works
+	# and this tool proving only that the interface lays out.
+	if zoom > 0.0 or map_filter >= 0:
+		await get_tree().process_frame
+		if map_filter >= 0:
+			hud.set_map_filter(map_filter)
+		if zoom > 0.0:
+			var view: WorldView = hud.find_children("", "WorldView", true, false)[0]
+			view.zoom = zoom
+			view.queue_redraw()
 
 	# Let the interface build, lay out and settle before grabbing the frame.
 	for i in 20:
