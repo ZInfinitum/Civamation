@@ -210,8 +210,86 @@ func generate(p_seed: int, p_type: int = Balance.WorldType.EARTH) -> void:
 	base_biome = biome.duplicate()
 	_place_settlement()
 	_seed_animals()
+	_seed_deposits()
 	_initial_reveal()
 	refresh_territory(true)
+
+
+## Scatter discrete ore seams through the high ground, all of them hidden. What
+## the map shows before one is struck is the thin ambient ore the biome gives;
+## the real metal is in these, and somebody has to find them.
+func _seed_deposits() -> void:
+	deposits.clear()
+	var want := _rng.randi_range(Balance.DEPOSIT_COUNT_MIN, Balance.DEPOSIT_COUNT_MAX)
+	var tries := 0
+	while deposits.size() < want and tries < want * 60:
+		tries += 1
+		var x := _rng.randi_range(1, w - 2)
+		var y := _rng.randi_range(1, h - 2)
+		var i := idx(x, y)
+		var b := biome[i]
+		# Seams belong where rock is: hills and mountains mostly, and the odd one
+		# in the desert where the ground is stripped bare anyway.
+		var ok := b == Balance.Biome.HILLS or b == Balance.Biome.MOUNTAIN \
+				or (b == Balance.Biome.DESERT and _rng.randf() < 0.33)
+		if not ok:
+			continue
+		var too_close := false
+		for d in deposits:
+			if Vector2(tile_pos(int(d["tile"])) - Vector2i(x, y)).length() < 4.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+		deposits.append({
+			"tile": i,
+			"richness": _rng.randf_range(Balance.DEPOSIT_RICHNESS_MIN,
+					Balance.DEPOSIT_RICHNESS_MAX),
+			"found": false,
+		})
+
+
+## Reveal a seam: its metal joins the ordinary ore field around it, so every
+## system downstream - the planner, mine siting, the map - sees it without
+## needing to know deposits exist.
+func strike_deposit(index: int) -> Dictionary:
+	if index < 0 or index >= deposits.size():
+		return {}
+	var d: Dictionary = deposits[index]
+	if bool(d["found"]):
+		return {}
+	d["found"] = true
+	deposits[index] = d
+	var p := tile_pos(int(d["tile"]))
+	var rich := float(d["richness"])
+	var r := Balance.DEPOSIT_RADIUS
+	for oy in range(-r, r + 1):
+		for ox in range(-r, r + 1):
+			var x: int = p.x + ox
+			var y: int = p.y + oy
+			if not in_bounds(x, y):
+				continue
+			var fall := 1.0 - sqrt(float(ox * ox + oy * oy)) / float(r + 1)
+			if fall <= 0.0:
+				continue
+			ore[idx(x, y)] += rich * fall
+	_recompute_static_totals()
+	return d
+
+
+## An undiscovered seam somebody could plausibly stumble on, or -1.
+func findable_deposit(rng: RandomNumberGenerator) -> int:
+	var options: Array[int] = []
+	for i in deposits.size():
+		var d: Dictionary = deposits[i]
+		if bool(d["found"]):
+			continue
+		if Balance.DEPOSIT_NEEDS_EXPLORED and explored[int(d["tile"])] == 0:
+			continue
+		options.append(i)
+	if options.is_empty():
+		return -1
+	return options[rng.randi() % options.size()]
 
 
 ## Value below which `frac` of the array falls. Sampled rather than fully
@@ -711,6 +789,8 @@ func refresh_visibility(scout_tiles: PackedInt32Array, scout_sight: int) -> void
 ## a union of circles now - one per settlement - which is what a second town
 ## actually is. Set by Sim; the home circle is always element zero.
 var claims: Array[Dictionary] = []
+## Discrete ore seams, hidden until struck. See _seed_deposits.
+var deposits: Array[Dictionary] = []
 
 
 func refresh_territory(force: bool = false) -> void:
@@ -864,6 +944,7 @@ func to_dict() -> Dictionary:
 		"type": world_type,
 		"origin_x": origin.x, "origin_y": origin.y,
 		"radius": territory_radius,
+		"deposits": deposits.duplicate(true),
 		# refresh_territory() only rebuilds when the radius has moved enough to
 		# matter, so the live territory can lag the live radius. Persist the
 		# radius the territory was actually built from, or loading would quietly
@@ -881,6 +962,21 @@ func to_dict() -> Dictionary:
 func from_dict(d: Dictionary) -> void:
 	generate(int(d.get("seed", 0)), int(d.get("type", Balance.WorldType.EARTH)))
 	origin = Vector2i(int(d.get("origin_x", origin.x)), int(d.get("origin_y", origin.y)))
+
+	# Deposits are re-seeded identically by generate() above, but *which* have
+	# been struck is real progress and has to come back from the save - along
+	# with the ore they added to the field around them.
+	var saved: Array = d.get("deposits", [])
+	if not saved.is_empty():
+		deposits.clear()
+		for e in saved:
+			if e is Dictionary:
+				deposits.append({"tile": int(e.get("tile", 0)),
+						"richness": float(e.get("richness", 0.0)),
+						"found": false})
+		for i in deposits.size():
+			if bool((saved[i] as Dictionary).get("found", false)):
+				strike_deposit(i)
 
 	var enc: Variant = d.get("explored", [])
 	if enc is Array and not (enc as Array).is_empty():

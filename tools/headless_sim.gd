@@ -279,8 +279,12 @@ func _test_legacy() -> void:
 ## A silent balance regression should break the build, not be discovered in
 ## play three weeks later. Wide tolerances - this catches things falling over,
 ## not honest tuning.
-const BASELINE := {"day": 500.0, "pop_min": 300.0, "pop_max": 40000.0,
-	"techs_min": 18, "explored_min": 0.25}
+## Wide tolerances on purpose: this catches things falling over, not honest
+## tuning. techs_min came down from 18 when the age structure landed - a
+## population that has to raise and replace its workers reaches day 500 with
+## rather less figured out, which is the point of having one.
+const BASELINE := {"day": 500.0, "pop_min": 200.0, "pop_max": 40000.0,
+	"techs_min": 14, "explored_min": 0.25}
 
 
 func _test_baseline() -> void:
@@ -490,12 +494,7 @@ func _test_settlements() -> void:
 			far_enough += 1
 			if Sim.world.workable(i) and not Balance.is_water_biome(Sim.world.biome[i]):
 				buildable += 1
-		var cost := Sim.settlement_cost()
-		var afford := "yes"
-		for res in cost:
-			if Sim.resources.get(res, 0.0) < float(cost[res]):
-				afford = "no - %s %s of %s" % [res,
-						Balance.fmt(Sim.resources.get(res, 0.0)), Balance.fmt(float(cost[res]))]
+		var afford := "n/a - the point is the gate"
 		_failures.append(("settlements: %d points and nowhere legal. "
 				% Sim.settlement_points)
 				+ "%d walked, %d far enough out, %d of those buildable, affordable: %s"

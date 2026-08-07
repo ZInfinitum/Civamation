@@ -97,6 +97,11 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 	var last_stall_day := 0.0
 	var stalled_from := -1.0
 	var samples := 0
+	var dependency_peak := 0.0
+	var seams_at_end := 0
+	var herd_min := 1.0
+	var herd_sum := 0.0
+	var herd_n := 0
 
 	var elapsed := 0.0
 	var next_sample := 0.0
@@ -128,6 +133,15 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 			last_stall_pop = Sim.population
 			last_stall_day = elapsed
 
+		# Sampled every chunk rather than every report, so a brief collapse
+		# between samples cannot hide.
+		var hh := Sim.world.stock_health(Sim.world.game, Sim.world.game_cap)
+		herd_min = minf(herd_min, hh)
+		herd_sum += hh
+		herd_n += 1
+		var dep := (Sim.children() + Sim.retired()) / maxf(Sim.population, 1.0)
+		dependency_peak = maxf(dependency_peak, dep)
+
 		if elapsed >= next_sample:
 			next_sample += SAMPLE_EVERY
 			samples += 1
@@ -145,6 +159,21 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 				"settlements": Sim.settlements.size(),
 				"snow": Sim.snow_depth,
 				"temp": Sim.temperature(),
+				# Demographics - the whole reason the age bands exist is that
+				# these can differ while population looks identical.
+				"children": Sim.children(),
+				"retired": Sim.retired(),
+				"mean_age": Sim.mean_age(),
+				"eaters": Sim.eaters(),
+				"deaths_age": Sim.deaths_age,
+				"deaths_hunger": Sim.deaths_hunger,
+				# Is the map still producing news?
+				"seams": Sim.deposits_found(),
+				"seams_total": Sim.deposits_total(),
+				# Is the economy actually in balance, or held up by a floor?
+				"food_sat": Sim.food_satisfaction,
+				"housing": Sim.housing,
+				"forage": Sim.world.stock_health(Sim.world.forage, Sim.world.forage_cap),
 			})
 
 	var bad := ""
@@ -164,6 +193,16 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 		"stalled_from": stalled_from, "bad": bad,
 		"thinker_share": float(Sim.jobs.get("thinker", 0)) / maxf(float(Sim.workforce()), 1.0),
 		"herd": Sim.world.stock_health(Sim.world.game, Sim.world.game_cap),
+		"herd_min": herd_min,
+		"herd_mean": herd_sum / maxf(float(herd_n), 1.0),
+		"dependency": (Sim.children() + Sim.retired()) / maxf(Sim.population, 1.0),
+		"dependency_peak": dependency_peak,
+		"mean_age": Sim.mean_age(),
+		"deaths_age": Sim.deaths_age,
+		"deaths_hunger": Sim.deaths_hunger,
+		"seams": Sim.deposits_found(),
+		"seams_total": Sim.deposits_total(),
+		"settlements": Sim.settlements.size(),
 	})
 
 	print("seed %-7d %-12s pop %-10s era %d  techs %2d  up %2d  out %-9s "
@@ -289,6 +328,54 @@ func _report(days: int) -> void:
 	print("  worlds that stalled for %d days: %d/%d"
 			% [int(STALL_WINDOW_DAYS), stalls, _seeds.size()])
 	print("  worlds with non-finite or negative state: %d/%d" % [broken, _seeds.size()])
+
+	# The refuge floor was doing load-bearing work last time. Watch it directly:
+	# a *mean* herd health barely above the floor means the stock is not living
+	# at a level, it is being held at one.
+	var hmean: Array = []
+	var hmin: Array = []
+	for s2 in _seeds:
+		hmean.append(float(s2["herd_mean"]))
+		hmin.append(float(s2["herd_min"]))
+	print("  herd health, mean over the whole run: median %2.0f%%  worst %2.0f%%"
+			% [_pct(hmean, 0.5) * 100.0, _pct(hmean, 0.0) * 100.0])
+	print("  herd health, lowest ever touched:     median %2.0f%%  worst %2.0f%%   (floor %2.0f%%)"
+			% [_pct(hmin, 0.5) * 100.0, _pct(hmin, 0.0) * 100.0,
+			Balance.STOCK_REFUGE * 100.0])
+
+	# Demographics. A civilisation of children cannot work, and one of
+	# pensioners cannot grow - both look identical in a headcount.
+	var dep: Array = []
+	var deppk: Array = []
+	var ages: Array = []
+	var d_age := 0.0
+	var d_hunger := 0.0
+	for s3 in _seeds:
+		dep.append(float(s3["dependency"]))
+		deppk.append(float(s3["dependency_peak"]))
+		ages.append(float(s3["mean_age"]))
+		d_age += float(s3["deaths_age"])
+		d_hunger += float(s3["deaths_hunger"])
+	print("")
+	print("demographics")
+	print("  dependants (children + retired)  median %2.0f%%   peak seen %2.0f%%"
+			% [_pct(dep, 0.5) * 100.0, _pct(deppk, 1.0) * 100.0])
+	print("  mean age                         median %.1f   range %.1f - %.1f"
+			% [_pct(ages, 0.5), _pct(ages, 0.0), _pct(ages, 1.0)])
+	print("  deaths: %s of old age, %s of hunger (%.0f%% of deaths were hunger)"
+			% [Balance.fmt(d_age), Balance.fmt(d_hunger),
+			d_hunger / maxf(d_age + d_hunger, 1.0) * 100.0])
+
+	# Is the map still producing news after it has been walked?
+	var seams: Array = []
+	var seams_total := 0
+	for s4 in _seeds:
+		seams.append(float(s4["seams"]))
+		seams_total = maxi(seams_total, int(s4["seams_total"]))
+	print("")
+	print("ore seams struck: median %d of about %d placed  (range %d - %d)"
+			% [int(_pct(seams, 0.5)), seams_total, int(_pct(seams, 0.0)),
+			int(_pct(seams, 1.0))])
 
 	# Per-shape, because the shapes are supposed to differ - but by how much?
 	print("")
