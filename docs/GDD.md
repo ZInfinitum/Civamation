@@ -25,7 +25,7 @@ disagree, Balance.gd is right and this document is stale.
 12. [Building](#12-building)
 13. [Knowledge, techs and upgrades](#13-knowledge-techs-and-upgrades)
 14. [Eras and progression](#14-eras-and-progression)
-15. [Player agency — what the elders will never do](#15-player-agency--what-the-elders-will-never-do)
+15. [Player agency — what the elders will never do](#15-player-agency--what-the-elders-will-never-do) *(includes settlements)*
 16. [Legacy, profile and the meta-game](#16-legacy-profile-and-the-meta-game)
 17. [Interface, art and performance](#17-interface-art-and-performance)
 18. [Not built yet](#18-not-built-yet)
@@ -180,6 +180,31 @@ and they do three things at once: they give the game a rhythm instead of a
 monotone climb, they make storage and spoilage matter, and they make *when* you
 issue a decree a real question.
 
+**Weather.** Under the seasons sits a faster rhythm. A season is slow, known in
+advance and something to plan around; weather turns over every **2–7 days**,
+unannounced, and is something to *notice* — the reason to glance at a game that
+is otherwise running itself.
+
+| Weather | Effect | Sky |
+| --- | --- | --- |
+| **Clear** | build ×1.10, explore ×1.10 | almost empty |
+| **Fair** | farm ×1.05 | light |
+| **Overcast** | explore ×0.95 | heavy |
+| **Rain** | farm ×1.20, forage ×1.10, build ×0.90, explore ×0.85 | full |
+| **Storm** | build ×0.70, explore ×0.60, game ×0.85, farm ×1.10 | total |
+| **Snow** | farm ×0.80, forage ×0.75, explore ×0.70, build ×0.85 | heavy |
+
+Each is weighted per season, so snow belongs to winter without being
+special-cased anywhere. Effects are deliberately small — weather is texture, not
+difficulty; the season multipliers do the heavy lifting.
+
+**Clouds** are the visible half of it. How much of the sky is covered *is* the
+current weather, so it reads off the map without looking at a label. Their
+positions are a pure function of the in-game day, so they cost no state, never
+drift out of step with the simulation, and come back identical after a reload;
+they drift in world space rather than screen space, so they do not slide around
+when you pan. Reduced motion turns them off.
+
 **Offline.** The game credits up to **12 hours** of absence by running the real
 simulation rather than approximating it (capped at 6,000 substeps of up to 2
 days each), and reports what happened as a **digest** — population, era, techs,
@@ -211,10 +236,20 @@ not optional** — without it the settlement is trapped on its starting rock.
 Generation is elevation × latitude × rainfall, from value noise at the shape's
 feature scale, with rivers traced downhill from high ground to the sea.
 
-**Seeds.** Every world is reproducible from its seed. The pause menu shows the
-seed and shape as one copyable line — `482913 / Archipelago` — and New World
-accepts that whole line back, a bare number, or **any words at all**, which are
-hashed. `midsummer` is a perfectly good seed and always the same world.
+**Seeds.** A seed fixes the **world**: the same land, rivers and ore, the same
+starting location, the same six people with the same things in front of them.
+Two players who type the same seed begin in exactly the same place.
+
+It does not fix the **run**. Each new game rolls a salt, so the weather, the
+events, the council questions and the boons differ between two games on one
+seed — and they diverge further with every decision either player makes. A seed
+is a starting position, not a script. (The salt is saved, so reloading
+continues the run you were in; the headless harness pins it to zero.)
+
+The pause menu shows the seed and shape as one copyable line — `482913 /
+Archipelago` — and New World accepts that whole line back, a bare number, or
+**any words at all**, which are hashed. `midsummer` is a perfectly good seed and
+always the same world.
 
 ### Fog of war — three states
 
@@ -734,6 +769,33 @@ Where you put one is the whole decision, and it is a genuinely spatial one: an
 outpost on a mountain range you have just learned to cross opens ore the
 settlement could not otherwise reach.
 
+### Settlements
+
+A second place people actually live, as distinct from an outpost, which is a
+place that sends things home. A settlement houses **140** people, widens the
+reach, and works its own country properly — about **2.6×** what an outpost sends
+back.
+
+They are bought with **settlement points**, *earned by growing* rather than
+purchased: the first at **400** people, then 1,500, 6,000, 25,000, 100,000. That
+makes founding one a milestone rather than a transaction, and stops a rich
+civilisation from blanketing the map. Settings carries an openly-labelled cheat
+that grants a point.
+
+The material price is a **share of the stores** — 55% of the timber, 40% of the
+granary — not a fixed sum. A flat price cannot work: the auto-builder spends
+materials as fast as they arrive, so stores hover around whatever the next
+building costs rather than accumulating, and any absolute number is either
+trivial late or permanently just out of reach. Same reasoning as the festival
+costing a third of the granary rather than a number of loaves.
+
+**Known limitation.** Territory is one circle centred on the first settlement,
+so a new settlement widens that circle rather than claiming the ground where it
+stands — found one sixteen tiles east and the land sixteen west is claimed too.
+Proper multi-centre territory touches the whole territory and worker-spot path
+and is not built. Settlements raise the radius *ceiling* in the meantime, which
+is what makes them worth founding once the home circle is capped.
+
 ### Trade
 
 Unlocked by **Coinage**. Export up to 30% of one resource's production at 72%
@@ -899,6 +961,11 @@ Honestly, and in rough priority order:
 ## 19. Known design problems
 
 Written down rather than discovered later.
+
+### Territory is a single circle
+
+Settlements claim ground by widening one circle centred on the original
+settlement, rather than claiming the land where they actually stand. See §15.
 
 ### The ore-tier dead zone
 

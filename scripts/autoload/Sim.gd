@@ -42,6 +42,24 @@ signal council_closed(id: String, choice: String, by_elders: bool)
 ## forking into a new one.
 var rng := RandomNumberGenerator.new()
 
+## What a seed promises, and what it does not.
+##
+## A seed fixes the *world*: the same land, the same rivers and ore, the same
+## starting location, the same six people with the same things in front of them.
+## Two players who type the same seed begin in exactly the same place.
+##
+## It does not fix the *run*. Each new game rolls a salt, so the weather, the
+## events, the council questions and the boons differ between two games on the
+## same seed - and they diverge further with every decision either player makes.
+## A seed is a starting position, not a script.
+##
+## The salt is saved, so reloading continues the run you were in rather than
+## forking a new one, and the headless harness pins it to zero because a
+## regression test that cannot reproduce its own numbers measures nothing.
+var run_salt: int = 0
+## Set by the harness. Makes new_game reproducible salt and all.
+var deterministic := false
+
 var world: CivWorld
 
 var day: float = 0.0
@@ -216,8 +234,9 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 
 	world = CivWorld.new()
 	world.generate(p_seed, p_type)
+	run_salt = 0 if deterministic else randi()
 	# Offset so the simulation's stream is not the terrain generator's stream.
-	rng.seed = hash("civamation-sim:%d:%d" % [p_seed, p_type])
+	rng.seed = hash("civamation-sim:%d:%d:%d" % [p_seed, p_type, run_salt])
 
 	day = 0.0
 	population = 6.0
@@ -588,7 +607,11 @@ func ascend(world_type: int = -1) -> bool:
 	Profile.runs_completed += 1
 	var keep := Profile.legacy_points + gained
 	var shape := world.world_type if world_type < 0 else world_type
-	new_game(0, shape)
+	# Setting a civilisation down should hand you a genuinely new country, so the
+	# next world is normally unseeded. Under the harness it has to be repeatable
+	# like everything else - this was the last thing making the balance numbers
+	# wander between runs.
+	new_game(hash("ascend:%d" % shape) % 1_000_000 + 1 if deterministic else 0, shape)
 	Profile.legacy_points = keep
 	Profile.save_profile()
 	_mods_dirty = true
@@ -3016,6 +3039,7 @@ func to_dict() -> Dictionary:
 		# Saved so a reloaded game continues the same sequence of events
 		# rather than forking into a different one at every load.
 		"rng_state": str(rng.state),
+		"run_salt": run_salt,
 		"Profile.legacy_points": Profile.legacy_points,
 		"lifetime_output": lifetime_output,
 		"boon_id": boon_id,
@@ -3077,6 +3101,7 @@ func from_dict(d: Dictionary) -> void:
 	day = float(d.get("day", 0.0))
 	population = float(d.get("population", 6.0))
 	peak_population = maxf(population, float(d.get("peak_population", population)))
+	run_salt = int(d.get("run_salt", 0))
 	var rs := String(d.get("rng_state", ""))
 	if rs.is_valid_int():
 		rng.state = int(rs)

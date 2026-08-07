@@ -59,6 +59,10 @@ func _ready() -> void:
 	# also silently spent the developer's own profile.
 	var saved := _snapshot_profile()
 	Profile.wipe()
+	# Pin the per-run salt, so every new_game below reproduces exactly. The real
+	# game deliberately rolls it, so two players on one seed get the same world
+	# and different weather.
+	Sim.deterministic = true
 
 	for s in range(1, seeds + 1):
 		# Cycle the world shapes so every generator path is covered.
