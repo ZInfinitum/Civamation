@@ -394,13 +394,20 @@ func _report(days: int) -> void:
 
 
 func _write_csv(path: String) -> void:
+	if _rows.is_empty():
+		return
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		print("could not write %s" % path)
 		return
-	var cols := ["seed", "shape", "day", "pop", "k", "era", "techs", "upgrades",
-			"output", "food", "wood", "ore", "knowledge", "thinkers", "workforce",
-			"herd", "forest", "settlements", "snow", "temp"]
+	# Columns come from the rows themselves. They used to be a hand-written list
+	# that had to be kept in step with what _run_one records, and of course it
+	# was not: eight metrics were added and silently never reached the file, so
+	# the CSV looked complete and was missing exactly the new things it had been
+	# extended for. Deriving them cannot drift.
+	var cols: Array[String] = []
+	for k in (_rows[0] as Dictionary).keys():
+		cols.append(String(k))
 	f.store_line(",".join(cols))
 	for r in _rows:
 		var parts: Array[String] = []
