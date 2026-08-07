@@ -129,6 +129,8 @@ var tiles_explored_per_day: float = 0.0
 # --- derived modifiers, rebuilt when techs/buildings/upgrades change ---
 var _mods_dirty := true
 var _yield_mult := {}
+## Scratch pool used while rebuilding, so a category can be summed before it multiplies.
+var _effect_pool := {}
 var _storage := {}
 var _spoilage_mult := 1.0
 var _knowledge_mult := 1.0
@@ -331,13 +333,22 @@ func _process(delta: float) -> void:
 ## Advance the simulation by `days`, in fixed substeps.
 func advance(days: float) -> void:
 	_accum += days
+	# Thirty days a second at ten substeps each is three hundred steps a second
+	# of precision nobody can see. The ecology is stable at the coarser rate.
+	var dt := Balance.FAST_STEP_DAYS if days_per_second() >= Balance.FAST_STEP_THRESHOLD \
+			else Balance.STEP_DAYS
 	var steps := 0
-	while _accum >= Balance.STEP_DAYS and steps < Balance.MAX_STEPS_PER_FRAME:
-		_accum -= Balance.STEP_DAYS
-		_step(Balance.STEP_DAYS)
+	while _accum >= dt and steps < Balance.MAX_STEPS_PER_FRAME:
+		_accum -= dt
+		_step(dt)
 		steps += 1
 	if steps > 0:
 		state_changed.emit()
+
+
+## How many in-game days pass per real second at the current speed.
+func days_per_second() -> float:
+	return Balance.SPEEDS[speed_index] / Balance.SECONDS_PER_DAY
 
 
 ## Credit offline time. Runs the real simulation rather than approximating it.
@@ -1144,7 +1155,7 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 				resources["food"] *= 0.55
 				_note("The winter is not mild. The stores take a beating.", offline)
 		"take_in":
-			population += maxf(12.0, population * 0.06)
+			population += Balance.migrant_count(population)
 			resources["knowledge"] += 60.0 + population * 1.5
 			_note("They stay. Within a month nobody can remember which of them arrived.", offline)
 		"trade":
@@ -1253,23 +1264,40 @@ func _functional_response(stock: float, attack: float, handling: float) -> float
 	return attack * stock / (1.0 + attack * handling * stock)
 
 
-## Every yield passes through here, which is where the two global multipliers
-## live: what previous civilisations left you, and whatever the sky is doing.
+## Every yield passes through here, and the shape of this function is the
+## single biggest lever on how far the numbers run.
+##
+## Things combine in three ways, deliberately:
+##
+## * **Techs add up, buildings add up, upgrades multiply.** Five techs at +30%
+##   each is +150%, not x3.7. Only the upgrade ladder - a bounded, purchased,
+##   deliberately exponential thing - is allowed to compound.
+## * **Temporary and global effects add to each other.** Legacy, an omen,
+##   momentum, a festival and a decree's boost pool into one bonus rather than
+##   stacking multiplicatively. Catching a boon during a festival under a decree
+##   is a very good moment; it is not a four-hundred-fold spike.
+## * **Penalties and the season still multiply.** A cost has to bite whatever
+##   else is going on, and the year's rhythm should scale what you have rather
+##   than be diluted by it.
+##
+## Independent multiplicative systems are what made two runs of the same length
+## differ by three orders of magnitude. This is the fix.
 func _mult(kind: String) -> float:
-	var m := float(_yield_mult.get(kind, 1.0)) * _legacy_mult
+	var m := float(_yield_mult.get(kind, 1.0))
+
+	var bonus := _legacy_mult - 1.0
 	if day < _omen_until:
-		m *= Balance.OMEN_MULTIPLIER
-	# Momentum: boons caught close together, decaying if you stop watching.
+		bonus += Balance.OMEN_MULTIPLIER - 1.0
 	if day < momentum_until and momentum > 0:
-		m *= 1.0 + float(momentum) * Balance.MOMENTUM_PER_BOON
-	# A decree is a commitment, so it cuts both ways.
+		bonus += float(momentum) * Balance.MOMENTUM_PER_BOON
 	if decree != "":
-		var d: Dictionary = Balance.DECREES[decree]
-		m *= float((d["boost"] as Dictionary).get(kind, 1.0))
-		m *= float((d["penalty"] as Dictionary).get(kind, 1.0))
+		bonus += float((Balance.DECREES[decree]["boost"] as Dictionary).get(kind, 1.0)) - 1.0
 	if kind == "knowledge" and day < festival_until:
-		m *= Balance.FESTIVAL_KNOWLEDGE_MULT
-	# The year turns. This is the whole of the seasons system.
+		bonus += Balance.FESTIVAL_KNOWLEDGE_MULT - 1.0
+	m *= 1.0 + maxf(bonus, -0.9)
+
+	if decree != "":
+		m *= float((Balance.DECREES[decree]["penalty"] as Dictionary).get(kind, 1.0))
 	m *= float((Balance.SEASONS[season]["mult"] as Dictionary).get(kind, 1.0))
 	return m
 
@@ -1458,7 +1486,13 @@ func _consume_and_grow(dt: float) -> void:
 	# momentum, never their civilisation.
 	var floor_pop := maxf(Balance.MIN_POPULATION, peak_population * Balance.PEAK_FLOOR_FRACTION)
 	population = maxf(floor_pop, population + (births_per_day - deaths_per_day) * dt)
-	peak_population = maxf(peak_population, population)
+	# The high-water mark only rises while the people are actually fed. Without
+	# that condition a summer spike set a permanent floor, winter could not
+	# correct it, and the safety net ended up holding nine thousand people on
+	# land that supported fourteen hundred - the net doing the work the ecology
+	# is supposed to do. A peak has to be a level the settlement sustained.
+	if food_satisfaction > 0.95 and water_satisfaction > 0.95:
+		peak_population = maxf(peak_population, population)
 
 	rates["food"] = production["food"] - population * Balance.FOOD_PER_PERSON_PER_DAY
 	rates["water"] = production["water"] - population * Balance.WATER_PER_PERSON_PER_DAY
@@ -2529,6 +2563,25 @@ func _rebuild_mods() -> void:
 	_birth_mult = 1.0
 	_housing_mult = 1.0
 	_territory_bonus = 0.0
+	# Techs pool together, buildings pool together, and the two pools multiply.
+	# Upgrades are the only thing that compounds freely.
+	_effect_pool = {}
+	for id in techs:
+		_apply_effects(Balance.TECHS[id]["effects"], 1)
+	var tech_pool := _effect_pool.duplicate()
+
+	_effect_pool = {}
+	for id in buildings:
+		var bcount: int = buildings[id]
+		if bcount > 0:
+			_apply_effects(Balance.BUILDINGS[id]["effects"], bcount)
+	for kind in tech_pool:
+		_yield_mult[kind] = (1.0 + float(tech_pool[kind])) \
+				* (1.0 + float(_effect_pool.get(kind, 0.0)))
+	for kind in _effect_pool:
+		if not tech_pool.has(kind):
+			_yield_mult[kind] = 1.0 + float(_effect_pool[kind])
+
 	_legacy_mult = 1.0 + Profile.legacy_points * Balance.LEGACY_BONUS_PER_POINT
 	# Permanent unlocks bought with Legacy, applied before anything else.
 	if Profile.has_perk("long_memory"):
@@ -2543,12 +2596,6 @@ func _rebuild_mods() -> void:
 	if day < _mine_bonus_days:
 		_yield_mult["ore"] = float(_yield_mult.get("ore", 1.0)) * 1.35
 
-	for id in techs:
-		_apply_effects(Balance.TECHS[id]["effects"], 1)
-	for id in buildings:
-		var count: int = buildings[id]
-		if count > 0:
-			_apply_effects(Balance.BUILDINGS[id]["effects"], count)
 	for id in upgrades:
 		var parts := upgrade_parts(id)
 		var kind: String = parts[0]
@@ -2581,8 +2628,11 @@ func _apply_effects(eff: Dictionary, count: int) -> void:
 	for key in eff:
 		match key:
 			"yield_mult":
+				# Additive within the category - see the note on _mult(). The
+				# caller decides which pool this lands in.
 				for kind in eff[key]:
-					_yield_mult[kind] = float(_yield_mult.get(kind, 1.0)) * pow(float(eff[key][kind]), count)
+					var add := (float(eff[key][kind]) - 1.0) * float(count)
+					_effect_pool[kind] = float(_effect_pool.get(kind, 0.0)) + add
 			"storage":
 				for res in eff[key]:
 					_storage[res] = float(_storage.get(res, 0.0)) + float(eff[key][res]) * count
@@ -2662,6 +2712,20 @@ func _check_era() -> void:
 		era_advanced.emit(era)
 
 
+## The current world's seed, as something a player can write down and share.
+func world_seed() -> int:
+	return world.world_seed if world != null else 0
+
+
+func world_shape_name() -> String:
+	return "" if world == null else String(Balance.world_type_info(world.world_type)["name"])
+
+
+## Seed and shape in one line, which is the thing worth copying.
+func seed_string() -> String:
+	return "%d / %s" % [world_seed(), world_shape_name()]
+
+
 func era_name() -> String:
 	return Balance.ERAS[era]["name"]
 
@@ -2710,7 +2774,7 @@ func _maybe_event(dt: float) -> void:
 			population = maxf(Balance.MIN_POPULATION, population * 0.94)
 			add_log(e["text"], "bad")
 		"migrants":
-			var joiners := maxf(2.0, population * 0.12)
+			var joiners := Balance.migrant_count(population)
 			population += joiners
 			add_log("%s %s of them join the band." % [e["text"], Balance.fmt_count(joiners)], "good")
 		"windfall":

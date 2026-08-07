@@ -17,39 +17,61 @@ extends Node
 ##    is the Cookie Clicker engine: there is always a next purchase, the numbers
 ##    never stop climbing, and nothing ever hard-caps.
 
-const SAVE_VERSION := 6
+const SAVE_VERSION := 7
 
 # --- Time -------------------------------------------------------------------
-## Real seconds per in-game day at 1x speed.
-const SECONDS_PER_DAY := 2.0
-## Fixed sim substeps per in-game day. Smaller dt keeps the ecology integration
-## stable when growth rates are high.
+## Real seconds per in-game day at the slowest speed. A day is the unit the
+## player thinks in, so it is the unit the clock counts - not years.
+const SECONDS_PER_DAY := 30.0
+## Fixed sim substeps per in-game day at ordinary speeds.
 const STEPS_PER_DAY := 10.0
-## Days simulated per fixed step.
 const STEP_DAYS := 1.0 / STEPS_PER_DAY
+## At the fast-forward speeds a day passes in a thirtieth of a second, and ten
+## substeps of it would be wasted precision. The ecology is stable at coarser
+## steps, so the substep count drops instead of the frame rate.
+const FAST_STEPS_PER_DAY := 3.0
+const FAST_STEP_DAYS := 1.0 / FAST_STEPS_PER_DAY
+## Above this many days per second, use the coarse step.
+const FAST_STEP_THRESHOLD := 4.0
+
 ## Hard cap on how much offline time is credited on load.
 const MAX_OFFLINE_HOURS := 12.0
-## Ceiling on catch-up steps executed in a single frame, so a long offline
-## credit or a stalled tab never freezes the game.
-const MAX_STEPS_PER_FRAME := 12
+## Ceiling on catch-up steps executed in a single frame.
+const MAX_STEPS_PER_FRAME := 40
 ## Offline catch-up runs the real simulation rather than approximating it, so
 ## it has to be bounded or a twelve-hour absence would take minutes to load.
-## Steps get longer instead of more numerous; `MAX_OFFLINE_STEP_DAYS` keeps the
-## logistic integration well inside its stable range.
 const MAX_OFFLINE_STEPS := 6000
 const MAX_OFFLINE_STEP_DAYS := 2.0
-## Later speeds unlock with the eras. Four is far too slow once a decision
-## takes a hundred days to pay off, and the simulation has the headroom.
-const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0]
-const SPEED_LABELS: Array[String] = ["II", "1x", "2x", "4x", "8x", "16x"]
-## Era needed for each speed. Index matches SPEEDS.
-const SPEED_UNLOCK_ERA: Array[int] = [0, 0, 0, 0, 3, 5]
+
+## Speeds, as multiples of the base thirty-seconds-a-day. The player picks how
+## long a day should take, not an abstract multiplier, so the labels say that.
+##   1x   -> 30 seconds a day
+##   2x   -> 15 seconds a day
+##   30x  -> 1 second a day
+##   900x -> 1 second a month
+const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 30.0, 900.0]
+const SPEED_LABELS: Array[String] = ["II", "30s", "15s", "1s", "1mo"]
+const SPEED_TIPS: Array[String] = [
+	"Paused",
+	"Thirty seconds a day",
+	"Fifteen seconds a day",
+	"One second a day",
+	"One second a month - thirty days a second",
+]
+## Era needed for each speed. The two fast-forwards arrive once there is enough
+## going on that watching every day would be tedious.
+const SPEED_UNLOCK_ERA: Array[int] = [0, 0, 0, 1, 3]
 
 # --- Population -------------------------------------------------------------
 const FOOD_PER_PERSON_PER_DAY := 1.0
 const WATER_PER_PERSON_PER_DAY := 0.5
 ## Max births per person per day when fed, watered and housed.
-const BIRTH_RATE_MAX := 0.030
+## Deliberately below what the land could support. A population that grows
+## right up against its carrying capacity eats everything it produces and lives
+## hand to mouth for ever - technically correct Malthusian behaviour, and not
+## the game this is. Slack means the granary fills, winter is survived out of
+## store rather than out of the safety net, and growth feels like abundance.
+const BIRTH_RATE_MAX := 0.021
 ## Baseline mortality, always present.
 const DEATH_RATE_BASE := 0.010
 ## Extra mortality when the tribe goes short. Deliberately gentle: hunger
@@ -66,6 +88,32 @@ const MIN_POPULATION := 4.0
 const PEAK_FLOOR_FRACTION := 0.75
 ## Below this fraction of need, the log starts mentioning hunger.
 const FAMINE_THRESHOLD := 0.85
+
+## How many people a wandering band is worth when it joins you.
+##
+## This used to be a flat percentage of the settlement, which is wrong twice
+## over. It is wrong in the fiction - a band walking out of the hills is fifty
+## people whether it finds a village or a city - and it was badly wrong in the
+## simulation: at ten thousand people a single event added twelve hundred mouths
+## in one day, far past anything the land was feeding. The never-lose floor then
+## locked the new number in, and the settlement spent the rest of the run at a
+## population its fields could not support with the granary pinned at zero.
+##
+## Sub-linear instead: a band is a band. It still feels generous early, when a
+## dozen arrivals doubles you, and it stays a pleasant event later without being
+## the largest single source of population in the game.
+const MIGRANT_BASE := 2.0
+const MIGRANT_SCALE := 1.5
+const MIGRANT_EXPONENT := 0.5
+## Never more than this fraction of the settlement in one arrival, whatever the
+## curve says. Only binds in the first few dozen people.
+const MIGRANT_MAX_FRACTION := 0.35
+
+
+## The size of a band of newcomers, given how big the settlement already is.
+static func migrant_count(population: float) -> float:
+	var band := MIGRANT_BASE + pow(maxf(population, 0.0), MIGRANT_EXPONENT) * MIGRANT_SCALE
+	return minf(band, maxf(2.0, population * MIGRANT_MAX_FRACTION))
 
 # --- Ecology (Rosenzweig-MacArthur / Holling type II) -----------------------
 ## Intrinsic regrowth rate of wild game, per day.
@@ -297,6 +345,25 @@ const DEFAULT_COST_GROWTH := 1.15
 ## steep geometric cost belongs.
 const HOUSING_COST_GROWTH := 1.04
 
+## Places to stand and work - farm plots, woodlots, mines, quarries.
+##
+## These had the default steep growth, and it produced exactly the failure the
+## housing note above describes, one level further down. A farm plot is a work
+## *slot*, so food production is proportional to the number of plots; at 1.15 the
+## seventy-sixth plot cost a million timber and the count could only ever rise
+## with the logarithm of income. Plots therefore crawled up by one per month
+## while population needed them proportionally, and the late game stalled dead:
+## a settlement holding eleven thousand people on seventy-five plots, food
+## satisfaction between 0.3 and 0.8 all year, permanently short and permanently
+## held up by the never-lose floor rather than fed by its own fields.
+##
+## A stalled idler is a broken idler, and a game whose promise is that the line
+## always goes up cannot have its late game be a chronic famine held level by the
+## safety net. Work slots track the settlement instead of lagging it. The steep
+## geometric curve stays where it belongs - on multipliers and upgrades, which is
+## where the idler's real progression lives and where a wall is the point.
+const WORKSITE_COST_GROWTH := 1.045
+
 const BUILDINGS := {
 	"firepit": {
 		"name": "Fire Pit",
@@ -342,12 +409,14 @@ const BUILDINGS := {
 		"name": "Farm Plot",
 		"desc": "Broken ground, sown with saved grain. Food that does not run away.",
 		"cost": {"wood": 22.0, "stone": 6.0}, "work": 10.0, "requires": "agriculture",
+		"growth": WORKSITE_COST_GROWTH,
 		"effects": {"farm_plots": 1.0}
 	},
 	"woodlot": {
 		"name": "Woodlot",
 		"desc": "Planted rows cut on a rotation. Timber you grow instead of timber you find.",
 		"cost": {"wood": 30.0, "stone": 8.0}, "work": 11.0, "requires": "agriculture",
+		"growth": WORKSITE_COST_GROWTH,
 		"effects": {"woodlot_slots": 1.0}
 	},
 	"well": {
@@ -374,12 +443,14 @@ const BUILDINGS := {
 		"name": "Quarry",
 		"desc": "A worked stone face in the hills. Somewhere for quarriers to stand.",
 		"cost": {"wood": 45.0}, "work": 18.0, "requires": "masonry",
+		"growth": WORKSITE_COST_GROWTH,
 		"effects": {"quarry_slots": 2.0}
 	},
 	"mine": {
 		"name": "Mine",
 		"desc": "A shaft following the seam down. Whatever this age can work, this brings up.",
 		"cost": {"wood": 55.0, "stone": 40.0}, "work": 24.0, "requires": "prospecting",
+		"growth": WORKSITE_COST_GROWTH,
 		"effects": {"mine_slots": 2.0}
 	},
 	"smelter": {
@@ -981,6 +1052,41 @@ const OUTPOST_MIN_DISTANCE := 8.0
 ## Each outpost adds this much worked land, and its tile's richness on top.
 const OUTPOST_TERRITORY := 1.2
 const OUTPOST_MAX := 12
+
+# --- Map filters ------------------------------------------------------------
+## Different questions asked of the same picture. The default shows every
+## person in the colour of the trade they work; the others answer "how many are
+## there", "where is the land worn out", "where is anything worth having".
+enum MapFilter { TRADES, PEOPLE, LAND, RESOURCES, TERRITORY }
+
+const MAP_FILTERS := [
+	{
+		"id": MapFilter.TRADES, "name": "Trades",
+		"desc": "Every person coloured by the work they do.",
+	},
+	{
+		"id": MapFilter.PEOPLE, "name": "Population",
+		"desc": "Everyone in one colour, so the crowd reads as a crowd.",
+	},
+	{
+		"id": MapFilter.LAND, "name": "The Land",
+		"desc": "How worn the ground is - herds, plants and tree cover, green to bare.",
+	},
+	{
+		"id": MapFilter.RESOURCES, "name": "What Is Here",
+		"desc": "Ore, gold, fertile ground and water, everything else dimmed.",
+	},
+	{
+		"id": MapFilter.TERRITORY, "name": "Reach",
+		"desc": "What is worked, what is walked, and what nobody has seen.",
+	},
+]
+
+## One person on the map is this many people in the settlement. Crowds are drawn
+## as individual figures up to a budget, then the count carries the meaning.
+const PEOPLE_PER_FIGURE_STEPS: Array[float] = [1.0, 5.0, 25.0, 100.0, 500.0, 2500.0, 10000.0]
+## Colour every figure the same in the Population filter.
+const CROWD_COLOR := Color("e8dcc0")
 
 # --- Seasons ----------------------------------------------------------------
 ## A four-phase year. One extra term in the multiplier chain and no new state,

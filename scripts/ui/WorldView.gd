@@ -51,6 +51,8 @@ var _place_accum := 0.0
 var _dragging := false
 ## Set by the Rule tab: the next map click founds an outpost.
 var placing_outpost := false
+## Which question the map is answering. See Balance.MAP_FILTERS.
+var filter: int = Balance.MapFilter.TRADES
 
 ## Where each job's markers get drawn. Recomputed on a slow timer because it
 ## sorts, and sorting every frame for cosmetics would be absurd.
@@ -255,6 +257,7 @@ func _rebuild_terrain() -> void:
 				var loss := 1.0 - clampf(world.forest[i] / fc, 0.0, 1.0)
 				if loss > 0.02:
 					c = c.lerp(DEPLETED, loss * 0.55)
+			c = _filter_tint(world, i, c)
 		_buf[o] = int(c.r * 255.0)
 		_buf[o + 1] = int(c.g * 255.0)
 		_buf[o + 2] = int(c.b * 255.0)
@@ -266,6 +269,41 @@ func _rebuild_terrain() -> void:
 	else:
 		_img.set_data(world.w, world.h, false, Image.FORMAT_RGBA8, _buf)
 		_tex.update(_img)
+
+
+## Recolour a tile according to whatever question the map is currently being
+## asked. Terrain colour is the default answer; the others overwrite it.
+func _filter_tint(world: CivWorld, i: int, base: Color) -> Color:
+	match filter:
+		Balance.MapFilter.LAND:
+			# How worn the ground is: green where it is whole, bare where it is not.
+			var wear := 1.0
+			var parts := 0
+			for pair in [[world.game, world.game_cap], [world.forage, world.forage_cap],
+					[world.forest, world.forest_cap]]:
+				var cap: float = (pair[1] as PackedFloat32Array)[i]
+				if cap > 0.5:
+					wear = minf(wear, (pair[0] as PackedFloat32Array)[i] / cap)
+					parts += 1
+			if parts == 0:
+				return base.lerp(Color("2b2f33"), 0.6)
+			return Color("6b4a2a").lerp(Color("5fbf5a"), clampf(wear, 0.0, 1.0))
+		Balance.MapFilter.RESOURCES:
+			# Only what is worth having; everything else out of the way.
+			if world.gold[i] > 0.10:
+				return Color("e3c14f")
+			if world.ore[i] > 0.25:
+				return Color("c0724a")
+			if world.stone[i] > 0.8:
+				return Color("9aa0a6")
+			if world.fertility[i] > 0.9:
+				return Color("94b85e")
+			if world.water_access[i] > 0.7:
+				return Color("4fa3d1")
+			return base.lerp(Color("1a1d21"), 0.72)
+		Balance.MapFilter.TERRITORY:
+			return base
+	return base
 
 
 # --- Drawing ----------------------------------------------------------------
@@ -303,6 +341,9 @@ func _draw() -> void:
 		_draw_wildlife(world, x0, y0, x1, y1)
 	if zoom >= DETAIL_ZOOM:
 		_draw_seams(world, x0, y0, x1, y1)
+
+	if filter == Balance.MapFilter.TERRITORY:
+		_draw_territory_overlay(world, x0, y0, x1, y1)
 
 	# Territory ring.
 	var home := _tile_to_screen(Vector2(world.origin) + Vector2(0.5, 0.5))
@@ -410,7 +451,13 @@ func _draw_workers(world: CivWorld) -> void:
 	if _worker_spots.is_empty():
 		_compute_worker_spots(world)
 
+	# One figure per N people, where N steps up as the settlement grows, so a
+	# city of forty thousand costs exactly as much to draw as a camp of twenty
+	# and still *looks* like forty thousand.
+	var per := _people_per_figure()
 	var budget := MAX_WORKER_MARKS
+	var crowd_mode := filter == Balance.MapFilter.PEOPLE
+
 	for job_id in Balance.JOB_ORDER:
 		if budget <= 0:
 			break
@@ -421,21 +468,48 @@ func _draw_workers(world: CivWorld) -> void:
 		if spots.is_empty():
 			continue
 		var job: Dictionary = Balance.JOBS[job_id]
-		var marks := clampi(int(ceil(float(n) / 8.0)), 1, 4)
-		marks = mini(marks, mini(spots.size(), budget))
-		for k in marks:
+		var col: Color = Balance.CROWD_COLOR if crowd_mode else job["color"]
+		# How many figures this trade is worth, capped so no single job floods.
+		var figures := clampi(int(ceil(float(n) / per)), 1, mini(14, budget))
+		for k in figures:
 			var i := spots[k % spots.size()]
 			var t := world.tile_pos(i)
-			var jitter := _scatter[(i + k * 7) % _scatter.size()] * 0.28
-			var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5) + jitter)
+			# Scatter within the tile, so a tile genuinely holds a crowd.
+			var jitter := _scatter[(i * 7 + k * 13) % _scatter.size()] * 0.38
+			var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.55) + jitter)
 			if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
 				continue
 			var tex := Art.worker(job_id)
-			if tex != null:
-				Art.draw_centred(self, tex, p, zoom * 0.9)
+			if tex != null and not crowd_mode:
+				Art.draw_centred(self, tex, p, zoom * 0.55)
 			else:
-				_draw_worker(p, zoom * 0.40, String(job["glyph"]), job["color"])
+				_draw_person(p, zoom, col)
 			budget -= 1
+
+
+## People are five pixels, and every one of them means something: head, body,
+## and the colour of the trade. Legible at a glance, cheap to draw, and it
+## scales down to a dot without becoming mush.
+func _draw_person(p: Vector2, tile: float, col: Color) -> void:
+	var px := maxf(1.0, tile * 0.085)
+	# head
+	draw_rect(Rect2(p.x - px * 0.5, p.y - px * 2.5, px, px), col.lightened(0.25), true)
+	# body, two pixels tall
+	draw_rect(Rect2(p.x - px * 0.5, p.y - px * 1.5, px, px * 2.0), col, true)
+	# legs, split
+	draw_rect(Rect2(p.x - px, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
+	draw_rect(Rect2(p.x + px * 0.2, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
+
+
+## Each figure stands for this many people. Steps rather than a smooth ratio, so
+## the crowd does not shimmer as the population creeps.
+func _people_per_figure() -> float:
+	var pop := Sim.population
+	var steps: Array = Balance.PEOPLE_PER_FIGURE_STEPS
+	for i in range(steps.size() - 1, -1, -1):
+		if pop >= float(steps[i]) * 30.0:
+			return float(steps[i])
+	return 1.0
 
 
 func _compute_worker_spots(world: CivWorld) -> void:
@@ -595,6 +669,24 @@ func _draw_group(center: Vector2, s: float, id: String, slot: int, color: Color,
 	return slot
 
 
+## Worked, walked, or unseen - the three states of ground, said plainly.
+func _draw_territory_overlay(world: CivWorld, x0: int, y0: int, x1: int, y1: int) -> void:
+	var worked := {}
+	for i in world.territory:
+		worked[i] = true
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			var i := world.idx(x, y)
+			var col := Color(0, 0, 0, 0)
+			if worked.has(i):
+				col = Color(0.85, 0.72, 0.35, 0.22)
+			elif world.explored[i] != 0:
+				col = Color(0.4, 0.55, 0.7, 0.12)
+			if col.a > 0.0:
+				draw_rect(Rect2(_tile_to_screen(Vector2(x, y)), Vector2(zoom, zoom) + Vector2.ONE),
+						col, true)
+
+
 # --- Outposts ---------------------------------------------------------------
 
 func _draw_outposts(world: CivWorld) -> void:
@@ -696,6 +788,10 @@ func _draw_legend() -> void:
 	var x := 8.0
 	var y := size.y - 8.0
 	var shown := 0
+	var per := _people_per_figure()
+	if per > 1.0:
+		draw_string(font, Vector2(x, y - 20.0), "one figure = %s people" % Balance.fmt_count(per),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.6, 0.62, 0.6))
 	for job_id in Balance.JOB_ORDER:
 		if shown >= 5:
 			break
@@ -708,7 +804,7 @@ func _draw_legend() -> void:
 			Art.draw_centred(self, ltex, Vector2(x + 7.0, y - 9.0), 16.0)
 		else:
 			_draw_worker(Vector2(x + 7.0, y - 9.0), 15.0, String(job["glyph"]), job["color"])
-		var label := "%s %d" % [job["name"], n]
+		var label := "%s %s" % [job["name"], Balance.fmt_count(float(n))]
 		draw_string(font, Vector2(x + 17.0, y - 3.0), label,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, job["color"])
 		x += 17.0 + font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + 10.0

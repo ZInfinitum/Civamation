@@ -206,6 +206,11 @@ func _test_legacy() -> void:
 		waited += 100.0
 	var offer := Sim.legacy_on_offer()
 	var pop_before := Sim.population
+	# Legacy lives in the profile, which is deliberately *not* reset between
+	# runs - so the assertion is on what this ascension added, not on the total.
+	# Comparing against the total made the test pass or fail depending on
+	# whatever happened to be in user://profile.cfg.
+	var banked_before := Profile.legacy_points
 	if not Sim.can_ascend():
 		_failures.append("legacy: %d days earned only %.1f points - nothing is worth "
 				% [int(waited), offer] + "setting down")
@@ -213,14 +218,14 @@ func _test_legacy() -> void:
 	if not Sim.ascend(Balance.WorldType.EARTH):
 		_failures.append("legacy: ascend refused with %.1f points on offer" % offer)
 		return
-	if not is_equal_approx(Profile.legacy_points, offer):
-		_failures.append("legacy: carried %.2f forward, expected %.2f"
-				% [Profile.legacy_points, offer])
+	var gained := Profile.legacy_points - banked_before
+	if not is_equal_approx(gained, offer):
+		_failures.append("legacy: carried %.2f forward, expected %.2f" % [gained, offer])
 	if Sim.day > 1.0 or Sim.population > 10.0:
 		_failures.append("legacy: the new world did not actually start over")
 	Sim.simulate_days(300.0, true)
-	print("worth setting down after %d days; banked %.0f points; %.0f people before, "
-			% [int(waited), Profile.legacy_points, pop_before]
+	print("worth setting down after %d days; earned %.0f points; %.0f people before, "
+			% [int(waited), gained, pop_before]
 			+ "%.0f in the next run's first 300 days" % Sim.population)
 	if Sim.population < 20.0:
 		_failures.append("legacy: the run after ascending stalled at %.0f" % Sim.population)
@@ -384,10 +389,21 @@ func _report() -> void:
 	])
 
 
+## Two letters collided - forager and forester both came out "fo", which made
+## every job line in the trace ambiguous exactly where the wood economy needed
+## reading. Spelled out where the prefix is not unique.
+const JOB_ABBREV := {
+	"hunter": "hunt", "forager": "forage", "woodcutter": "wood",
+	"water_carrier": "water", "explorer": "scout", "builder": "build",
+	"farmer": "farm", "forester": "wood+", "quarrier": "quarry",
+	"miner": "mine", "thinker": "think",
+}
+
+
 func _job_summary() -> String:
 	var parts: Array[String] = []
 	for id in Balance.JOB_ORDER:
 		var n: int = Sim.jobs.get(id, 0)
 		if n > 0:
-			parts.append("%s%d" % [id.substr(0, 2), n])
+			parts.append("%s%d" % [String(JOB_ABBREV.get(id, id.substr(0, 4))), n])
 	return " ".join(parts)

@@ -66,6 +66,8 @@ var _trade_sell: OptionButton
 var _trade_buy: OptionButton
 var _council_dialog: AcceptDialog
 var _placing_outpost := false
+var _filter_pick: OptionButton
+var _filter_note: Label
 
 
 func _ready() -> void:
@@ -265,7 +267,7 @@ func _build_top_bar() -> Control:
 		var b := Button.new()
 		b.text = String(Balance.SPEED_LABELS[i])
 		b.toggle_mode = true
-		b.custom_minimum_size.x = 36
+		b.custom_minimum_size.x = 44
 		b.pressed.connect(_set_speed.bind(i))
 		row.add_child(b)
 		_speed_buttons.append(b)
@@ -426,10 +428,30 @@ func _build_center_column() -> Control:
 	whole.text = "Whole World"
 	whole.pressed.connect(func() -> void: _map.view_world())
 	bar.add_child(whole)
-	bar.add_child(_text("scroll to zoom, drag to pan", 11, MUTED))
+
+	# Overlays. The same picture, asked a different question - who is out there,
+	# how many of them, what the ground is worth, how far the reach goes.
+	_filter_pick = OptionButton.new()
+	for i in Balance.MAP_FILTERS.size():
+		var f: Dictionary = Balance.MAP_FILTERS[i]
+		_filter_pick.add_item(String(f["name"]), int(f["id"]))
+	_filter_pick.selected = 0
+	_filter_pick.item_selected.connect(func(i: int) -> void:
+		var f: Dictionary = Balance.MAP_FILTERS[i]
+		_map.filter = int(f["id"])
+		_filter_pick.tooltip_text = String(f["desc"])
+		_filter_note.text = String(f["desc"])
+		_map.queue_redraw())
+	_filter_pick.tooltip_text = String((Balance.MAP_FILTERS[0] as Dictionary)["desc"])
+	bar.add_child(_filter_pick)
+
+	_filter_note = _text(String((Balance.MAP_FILTERS[0] as Dictionary)["desc"]), 11, MUTED)
+	bar.add_child(_filter_note)
+
 	var spacer2 := Control.new()
 	spacer2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bar.add_child(spacer2)
+	bar.add_child(_text("scroll to zoom, drag to pan", 11, MUTED))
 	outer.add_child(bar)
 	return outer
 
@@ -1007,14 +1029,14 @@ func _refresh_summary() -> void:
 
 func _refresh_top() -> void:
 	_era_label.text = Sim.era_name()
-	_day_label.text = "Year %d, day %d" % [int(Sim.day / 360.0) + 1, int(Sim.day) % 360 + 1]
+	_day_label.text = "Day %s" % Balance.fmt_count(floorf(Sim.day) + 1.0)
 	_pop_label.text = "%s people" % Balance.fmt_count(Sim.population)
 	var top := Sim.max_speed_index()
 	for i in _speed_buttons.size():
 		_speed_buttons[i].button_pressed = (i == Sim.speed_index)
 		_speed_buttons[i].disabled = i > top
-		_speed_buttons[i].tooltip_text = "" if i <= top else "Unlocks in the %s" \
-				% Balance.ERAS[Balance.SPEED_UNLOCK_ERA[i]]["name"]
+		_speed_buttons[i].tooltip_text = String(Balance.SPEED_TIPS[i]) if i <= top \
+				else "Unlocks in the %s" % Balance.ERAS[Balance.SPEED_UNLOCK_ERA[i]]["name"]
 	var season: Dictionary = Balance.SEASONS[Sim.season]
 	_season_label.text = String(season["name"])
 	_season_label.add_theme_color_override("font_color", season["color"])
@@ -1322,25 +1344,63 @@ func _open_new_world() -> void:
 		d.custom_minimum_size.x = 470
 		v.add_child(d)
 
+	# A LineEdit rather than a SpinBox, because the thing people actually have in
+	# hand is the line the pause menu gave them - "482913 / Archipelago" - and
+	# retyping only the number would silently hand them a different world.
 	var seed_row := HBoxContainer.new()
-	seed_row.add_child(_text("Seed (0 for random)", 13, MUTED))
-	var seed_edit := SpinBox.new()
-	seed_edit.min_value = 0
-	seed_edit.max_value = 999999
-	seed_edit.value = 0
+	seed_row.add_theme_constant_override("separation", 8)
+	seed_row.add_child(_text("Seed", 13, MUTED))
+	var seed_edit := LineEdit.new()
+	seed_edit.placeholder_text = "blank for a new world"
+	seed_edit.custom_minimum_size.x = 240
 	seed_row.add_child(seed_edit)
+	var paste_btn := Button.new()
+	paste_btn.text = "Paste"
+	paste_btn.pressed.connect(func() -> void: seed_edit.text = DisplayServer.clipboard_get())
+	seed_row.add_child(paste_btn)
 	v.add_child(seed_row)
+	v.add_child(_wrapped("A seed alone gives you the same land with whichever shape you pick "
+			+ "above. A whole copied line - \"482913 / Islands\" - picks the shape too."))
 
 	if Settings.confirm_new_world and Sim.day > 5.0:
 		v.add_child(_text("This abandons your current settlement.", 12, BAD))
 
 	dlg.confirmed.connect(func() -> void:
-		Sim.new_game(int(seed_edit.value), int(chosen["type"]))
+		var parsed := _parse_seed(seed_edit.text, int(chosen["type"]))
+		Sim.new_game(int(parsed["seed"]), int(parsed["type"]))
 		SaveSystem.save_game()
 		_map.view_home())
 	dlg.close_requested.connect(dlg.queue_free)
 	add_child(dlg)
 	dlg.popup_centered()
+
+
+## Read whatever was typed or pasted into the seed box. Accepts a bare number,
+## the "seed / Shape" line the pause menu copies, or arbitrary words - which are
+## hashed, so "midsummer" is a perfectly good seed and always the same world.
+func _parse_seed(raw: String, fallback_type: int) -> Dictionary:
+	var text := raw.strip_edges()
+	if text.is_empty():
+		return {"seed": 0, "type": fallback_type}
+
+	var world_type := fallback_type
+	var number := text
+	var slash := text.find("/")
+	if slash >= 0:
+		number = text.substr(0, slash).strip_edges()
+		var shape := text.substr(slash + 1).strip_edges().to_lower()
+		for info in Balance.WORLD_TYPES:
+			if String(info["name"]).to_lower() == shape:
+				world_type = int(info["id"])
+				break
+
+	if number.is_valid_int():
+		# 0 means "roll one", so a literal typed 0 has to become something else.
+		var n := absi(number.to_int())
+		return {"seed": (n % 1_000_000) if n != 0 else 1, "type": world_type}
+
+	# Not a number: hash it. Non-zero so it never reads as "random".
+	return {"seed": int(hash(number.to_lower()) % 1_000_000) + 1, "type": world_type}
 
 
 # --- Chronicle --------------------------------------------------------------
@@ -1547,6 +1607,29 @@ func _open_settings() -> void:
 	scroll.add_child(v)
 	dlg.add_child(scroll)
 
+	# The seed is the one thing in a procedural game worth carrying out of it -
+	# to hand somebody the same world, or to come back to this one later.
+	v.add_child(_heading("THIS WORLD"))
+	var seed_row := HBoxContainer.new()
+	seed_row.add_theme_constant_override("separation", 8)
+	var seed_field := LineEdit.new()
+	seed_field.text = Sim.seed_string()
+	seed_field.editable = false
+	seed_field.custom_minimum_size.x = 240
+	seed_field.tooltip_text = "The seed and shape that made this map."
+	seed_row.add_child(seed_field)
+	var copy_btn := Button.new()
+	copy_btn.text = "Copy"
+	var copied := _text("", 12, GOOD)
+	copy_btn.pressed.connect(func() -> void:
+		DisplayServer.clipboard_set(Sim.seed_string())
+		copied.text = "copied")
+	seed_row.add_child(copy_btn)
+	seed_row.add_child(copied)
+	v.add_child(seed_row)
+	v.add_child(_wrapped("Paste this whole line into New World to settle the same map again - "
+			+ "it carries the shape as well as the number."))
+
 	v.add_child(_heading("AUDIO"))
 	v.add_child(_slider_row("Master volume", Settings.master_volume, 0.0, 1.0, 0.05,
 			func(x: float) -> void:
@@ -1617,7 +1700,7 @@ func _open_settings() -> void:
 			+ "change speed. The map scrolls to zoom and drags to pan. Every control is "
 			+ "reachable with a gamepad."))
 
-	v.add_child(_heading("DANGER"))
+	v.add_child(_heading("ARTWORK"))
 	var reset_row := HBoxContainer.new()
 	var art_row := HBoxContainer.new()
 	var art_btn := Button.new()
