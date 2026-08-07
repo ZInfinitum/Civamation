@@ -39,6 +39,10 @@ var confirm_new_world := true
 ## Show the running commentary of everything the settlement does. Verbose, and
 ## exactly what you want when play-testing a balance change.
 var verbose_log := false
+## The tutorial is built, wired and saved, but deliberately not shown yet: the
+## steps and their triggers are in Balance.TUTORIAL_STEPS and the state machine
+## in Sim runs regardless. Flip this to render it.
+var tutorial_enabled := false
 
 
 func _ready() -> void:
@@ -50,6 +54,7 @@ func load_settings() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(PATH) != OK:
 		return
+	tutorial_enabled = bool(cfg.get_value("game", "tutorial", tutorial_enabled))
 	master_volume = float(cfg.get_value("audio", "master", master_volume))
 	music_volume = float(cfg.get_value("audio", "music", music_volume))
 	sfx_volume = float(cfg.get_value("audio", "sfx", sfx_volume))
@@ -71,6 +76,7 @@ func load_settings() -> void:
 
 func save_settings() -> void:
 	var cfg := ConfigFile.new()
+	cfg.set_value("game", "tutorial", tutorial_enabled)
 	cfg.set_value("audio", "master", master_volume)
 	cfg.set_value("audio", "music", music_volume)
 	cfg.set_value("audio", "sfx", sfx_volume)

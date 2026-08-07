@@ -107,6 +107,11 @@ var season: int = 0
 ## rhythm under the season's slow one - a few days at a time, unannounced.
 var weather: int = 0
 var weather_until: float = 0.0
+## Which tutorial step is next, and which have been seen. The machine runs
+## whether or not anything is drawing it - see Balance.TUTORIAL_STEPS.
+var tutorial_step: int = 0
+var tutorial_seen: Array[String] = []
+
 ## Centimetres of lying snow. Outlives the snowfall that made it and melts back
 ## with the temperature, so a hard week costs movement well after the sky clears.
 var snow_depth: float = 0.0
@@ -273,6 +278,8 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	weather = 0
 	weather_until = 0.0
 	snow_depth = 0.0
+	tutorial_step = 0
+	tutorial_seen.clear()
 	chronicle.clear()
 	notables.clear()
 	beat = 0
@@ -1149,6 +1156,56 @@ func deposits_found() -> int:
 
 func deposits_total() -> int:
 	return 0 if world == null else world.deposits.size()
+
+
+# --- Tutorial ---------------------------------------------------------------
+
+## The step the player should be shown next, or {} when there is nothing to
+## say. Runs whether or not anything is drawing it, so turning the tutorial on
+## is a matter of rendering this rather than of writing it.
+func tutorial_current() -> Dictionary:
+	while tutorial_step < Balance.TUTORIAL_STEPS.size():
+		var step: Dictionary = Balance.TUTORIAL_STEPS[tutorial_step]
+		if tutorial_seen.has(String(step["id"])):
+			tutorial_step += 1
+			continue
+		if not tutorial_ready(String(step["needs"])):
+			# Not applicable yet. Hold here rather than skipping ahead, so the
+			# steps stay in the order they teach best.
+			return {}
+		return step
+	return {}
+
+
+## Is this step's condition met? Each is a plain question about the simulation,
+## so a player who has already done the thing is never told to do it.
+func tutorial_ready(needs: String) -> bool:
+	match needs:
+		"always": return true
+		"no_firepit": return int(buildings.get("firepit", 0)) == 0
+		"no_explorer": return int(jobs.get("explorer", 0)) == 0 and world.frontier_open()
+		"can_decree": return can_set_decree() and population >= 20.0
+		"winter_soon": return season == 2 and population >= 30.0
+	return false
+
+
+## Mark the current step done and move on.
+func tutorial_advance() -> void:
+	var step := tutorial_current()
+	if step.is_empty():
+		return
+	tutorial_seen.append(String(step["id"]))
+	tutorial_step += 1
+	state_changed.emit()
+
+
+## Skip the whole thing.
+func tutorial_dismiss() -> void:
+	for step in Balance.TUTORIAL_STEPS:
+		if not tutorial_seen.has(String(step["id"])):
+			tutorial_seen.append(String(step["id"]))
+	tutorial_step = Balance.TUTORIAL_STEPS.size()
+	state_changed.emit()
 
 
 # --- Weather ----------------------------------------------------------------
@@ -3551,6 +3608,8 @@ func to_dict() -> Dictionary:
 		"weather": weather,
 		"weather_until": weather_until,
 		"snow_depth": snow_depth,
+		"tutorial_step": tutorial_step,
+		"tutorial_seen": tutorial_seen.duplicate(),
 		"beat": beat,
 		"trade_sell": trade_sell,
 		"trade_buy": trade_buy,
@@ -3624,6 +3683,10 @@ func from_dict(d: Dictionary) -> void:
 	weather = clampi(int(d.get("weather", 0)), 0, Balance.WEATHER.size() - 1)
 	weather_until = float(d.get("weather_until", 0.0))
 	snow_depth = float(d.get("snow_depth", 0.0))
+	tutorial_step = int(d.get("tutorial_step", 0))
+	tutorial_seen.clear()
+	for t in d.get("tutorial_seen", []):
+		tutorial_seen.append(String(t))
 	beat = int(d.get("beat", 0))
 	trade_sell = String(d.get("trade_sell", ""))
 	trade_buy = String(d.get("trade_buy", ""))

@@ -154,6 +154,7 @@ func _process(delta: float) -> void:
 	if _dirty:
 		_dirty = false
 		_refresh()
+		_refresh_tutorial()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1388,6 +1389,23 @@ func _on_game_reset() -> void:
 	_rebuild_lists()
 	_replay_log()
 	_dirty = true
+
+
+## The tutorial's one call site. Deliberately a no-op while the flag is off -
+## the state machine in Sim runs either way, so this can be turned on and tested
+## against a game that has not moved on underneath it.
+func _refresh_tutorial() -> void:
+	if not Settings.tutorial_enabled:
+		return
+	var step := Sim.tutorial_current()
+	if step.is_empty():
+		return
+	# Nothing draws it yet. When it does, it wants a small panel anchored near
+	# the control named by step["panel"], with the title, the text, a "next"
+	# that calls Sim.tutorial_advance() and a "skip" that calls
+	# Sim.tutorial_dismiss().
+	if Settings.verbose_log:
+		print("[tutorial] %s: %s" % [step["id"], step["title"]])
 
 
 func _on_settings_changed() -> void:
