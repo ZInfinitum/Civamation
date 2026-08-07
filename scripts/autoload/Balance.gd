@@ -1088,6 +1088,20 @@ const PEOPLE_PER_FIGURE_STEPS: Array[float] = [1.0, 5.0, 25.0, 100.0, 500.0, 250
 ## Colour every figure the same in the Population filter.
 const CROWD_COLOR := Color("e8dcc0")
 
+## --- Wildlife density -------------------------------------------------------
+## One animal marker used to mean "there is wildlife here", which told the player
+## nothing about how much. A herd is a quantity, and the map is the only place
+## that quantity is ever visible - so the number of animals drawn on a tile is
+## the number of animals on it, at a stated scale, exactly like the people.
+##
+## One unit of the abstract `game` stock is this many head of actual animal. A
+## rich forest tile carries about 34 units, so roughly thirteen thousand head.
+const ANIMALS_PER_GAME_UNIT := 400.0
+## And this many head get one icon on the map.
+const ANIMALS_PER_ICON := 1000.0
+## Ceiling per tile, so a very rich tile does not become a solid block of deer.
+const MAX_ANIMAL_ICONS_PER_TILE := 12
+
 # --- Seasons ----------------------------------------------------------------
 ## A four-phase year. One extra term in the multiplier chain and no new state,
 ## and it does three things at once: it gives the game a rhythm instead of a
@@ -1535,6 +1549,20 @@ static func fmt_count(value: float) -> String:
 		if c % 3 == 0 and i > 0:
 			out = "," + out
 	return out
+
+
+## The date, as a running clock: "412 days, 14:23:07".
+##
+## `day` is a float and always has been - the fractional part is the time of
+## day, it just was never shown. A settlement that ticks a bare day counter
+## looks stopped between days; one with a second hand is visibly alive even
+## paused, and at thirty seconds to the day the clock moves at roughly fifty
+## times real time, which reads as a place going about its business.
+static func fmt_clock(day: float) -> String:
+	var whole := floorf(maxf(day, 0.0))
+	var secs := int((maxf(day, 0.0) - whole) * 86400.0)
+	return "%s days, %02d:%02d:%02d" % [fmt_count(whole + 1.0),
+			secs / 3600, (secs / 60) % 60, secs % 60]
 
 
 ## Format a per-day rate with an explicit sign.

@@ -84,19 +84,67 @@ class Tile:
         self.rect(x, y, 1, h, c)
 
 
+# --- Square art in, isometric hexagon out -----------------------------------
+# The motifs above are all authored on a plain SIZE x SIZE square, which is by
+# far the easiest thing to draw on and to reason about. Turning that into the
+# tile the game actually uses is a post-process, so none of the drawing code
+# above has to know anything about hexagons:
+#
+#   1. scale up 2x, so a tile is 64 across and pixel-doubling is exact
+#   2. squash vertically to HEX_PX, which is the isometric camera - the ground
+#      is foreshortened, and it is the squash that makes the field read as
+#      tilted rather than as a flat top-down grid
+#   3. mask to a pointy-top hexagon, everything outside it transparent
+#
+# HEX_W / HEX_PX must match HEX_H in WorldView.gd (2/sqrt(3) * ISO_SQUASH).
+
+HEX_W = 64
+HEX_PX = 46  # round(64 * 1.1547 * 0.62)
+
+
+def in_hex(x, y):
+    """Pointy-top hexagon: corners top and bottom, flat left and right sides."""
+    dx = abs(x + 0.5 - HEX_W / 2.0) / (HEX_W / 2.0)
+    dy = abs(y + 0.5 - HEX_PX / 2.0) / (HEX_PX / 2.0)
+    if dy > 1.0 or dx > 1.0:
+        return False
+    # The sloped corners: the top and bottom quarters taper to a point.
+    if dy <= 0.5:
+        return True
+    return dx <= (1.0 - dy) * 2.0
+
+
+def to_hex(tile):
+    """SIZE x SIZE square of RGB -> HEX_W x HEX_PX of RGBA."""
+    out = []
+    for y in range(HEX_PX):
+        # Nearest-neighbour back into the doubled square.
+        sy = min(SIZE - 1, int(y * SIZE / float(HEX_PX)))
+        row = []
+        for x in range(HEX_W):
+            sx = min(SIZE - 1, x * SIZE // HEX_W)
+            r, g, b = tile.px[sy][sx]
+            row.append((r, g, b, 255 if in_hex(x, y) else 0))
+        out.append(row)
+    return out
+
+
 def write_png(path, tile):
+    rows = to_hex(tile)
     raw = bytearray()
-    for row in tile.px:
+    for row in rows:
         raw.append(0)  # filter type 0
-        for r, g, b in row:
-            raw += bytes((r, g, b))
+        for r, g, b, a in row:
+            raw += bytes((r, g, b, a))
 
     def chunk(tag, data):
         c = struct.pack(">I", len(data)) + tag + data
         return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
     png = b"\x89PNG\r\n\x1a\n"
-    png += chunk(b"IHDR", struct.pack(">IIBBBBB", SIZE, SIZE, 8, 2, 0, 0, 0))
+    # Colour type 6: truecolour with alpha. The corners outside the hexagon have
+    # to be transparent or every tile draws as a rectangle over its neighbours.
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", HEX_W, HEX_PX, 8, 6, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
     png += chunk(b"IEND", b"")
     with open(path, "wb") as f:
@@ -327,7 +375,7 @@ def main():
         draw(tile, Rng(7717 + i * 101))
         write_png(os.path.join(OUT, name + ".png"), tile)
         print("assets/terrain/%s.png" % name)
-    print("%d tiles, %dx%d" % (len(BIOMES), SIZE, SIZE))
+    print("%d tiles, %dx%d hexagons" % (len(BIOMES), HEX_W, HEX_PX))
 
 
 if __name__ == "__main__":

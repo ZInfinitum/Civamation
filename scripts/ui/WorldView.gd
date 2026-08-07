@@ -20,6 +20,23 @@ extends Control
 ## worker, that is drawn instead, with no other change anywhere. See
 ## `assets/README.md`.
 
+## --- Hex geometry ------------------------------------------------------------
+## Tiles are pointy-top hexagons in "odd-r" offset coordinates: the map data is
+## still a rectangular 96x64 array, and odd rows are drawn shifted half a hex to
+## the right. Nothing in the simulation had to change to make the map hexagonal;
+## it is entirely a question of where each cell is drawn.
+##
+## One hex is `zoom` pixels wide. A regular pointy-top hex is 2/sqrt(3) times as
+## tall as it is wide; the isometric camera then foreshortens the vertical axis
+## by ISO_SQUASH, which is what tilts the field away from a flat top-down grid.
+const HEX_TALL := 1.1547005  # 2 / sqrt(3)
+const ISO_SQUASH := 0.62
+## Full corner-to-corner height of one hex, in units of its width.
+const HEX_H := HEX_TALL * ISO_SQUASH
+## Vertical distance between row centres. Hex rows interlock, so this is 3/4 of
+## the height rather than all of it.
+const HEX_ROW := HEX_H * 0.75
+
 const FOG := Color("0a0d11")
 const FOG_EDGE := Color("161c23")
 const TERRITORY_LINE := Color(1, 1, 1, 0.32)
@@ -33,10 +50,17 @@ const ANIMAL_ZOOM := 7.0
 const TERRAIN_SPRITE_ZOOM := 8.0
 const MAX_TERRAIN_SPRITES := 1400
 const MIN_ZOOM := 3.0
-const MAX_ZOOM := 26.0
+## A tile has to get big enough to hold a visible crowd. At the old ceiling of
+## 26 a person was about one pixel and the map could never show the thing the
+## people are drawn for; the terrain art is 32px native, so this also lets it
+## reach 1:1 and past it.
+const MAX_ZOOM := 84.0
 ## Hard ceiling on overlay primitives per frame, whatever the population.
-const MAX_ANIMAL_MARKS := 90
-const MAX_WORKER_MARKS := 44
+const MAX_ANIMAL_MARKS := 400
+## A figure is four small filled rects. Several hundred of them costs nothing
+## next to the terrain pass, and a populated map is the whole point of drawing
+## people at all - so this budget is set by what looks right, not by fear.
+const MAX_WORKER_MARKS := 420
 
 var zoom: float = 13.0
 var camera := Vector2.ZERO  ## in tile coordinates
@@ -64,11 +88,43 @@ var _last_explored := -1
 var _last_territory := -1
 
 
+## The terrain shader has to apply to the terrain and to nothing else, and a
+## CanvasItem's material covers everything it draws - so the map is two layers.
+## This one is the hex field, one draw call; the overlay above it is everything
+## that stands on the ground and is drawn with ordinary primitives.
+class OverlayLayer extends Control:
+	var view: WorldView
+
+	func _draw() -> void:
+		if view != null:
+			view.draw_overlay()
+
+
+var _terrain_layer: ColorRect
+var _overlay: OverlayLayer
+
+
 func _ready() -> void:
 	custom_minimum_size = Vector2(420, 300)
 	clip_contents = true
 	focus_mode = Control.FOCUS_ALL
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+
+	_terrain_layer = ColorRect.new()
+	_terrain_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_terrain_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/hex_terrain.gdshader")
+	_terrain_layer.material = mat
+	add_child(_terrain_layer)
+
+	_overlay = OverlayLayer.new()
+	_overlay.view = self
+	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	add_child(_overlay)
+
 	_make_scatter()
 	Sim.game_reset.connect(_on_reset)
 	Art.reloaded.connect(func() -> void:
@@ -126,7 +182,9 @@ func _process(delta: float) -> void:
 		_dirty = true
 
 	if _terrain_dirty or _dirty:
-		queue_redraw()
+		_dirty = false
+		_sync_terrain_shader()
+		_overlay.queue_redraw()
 
 
 # --- Input ------------------------------------------------------------------
@@ -159,7 +217,7 @@ func _gui_input(event: InputEvent) -> void:
 				grab_focus()
 			accept_event()
 	elif event is InputEventMouseMotion and _dragging:
-		camera -= (event as InputEventMouseMotion).relative / zoom
+		_pan((event as InputEventMouseMotion).relative)
 		_clamp_camera()
 		_dirty = true
 		accept_event()
@@ -171,7 +229,7 @@ func _boon_hit(p: Vector2) -> bool:
 	if world == null or Sim.boon_id == "" or Sim.boon_tile < 0:
 		return false
 	var t := world.tile_pos(Sim.boon_tile)
-	var centre := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+	var centre := _tile_to_screen(Vector2(t))
 	return p.distance_to(centre) <= maxf(14.0, zoom * 0.8)
 
 
@@ -184,21 +242,77 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	_dirty = true
 
 
+## Drag the map. The screen delta has to be converted back through the hex
+## layout - a pixel down is not a row down, it is a row down over ISO_SQUASH.
+func _pan(screen_delta: Vector2) -> void:
+	camera -= Vector2(screen_delta.x, screen_delta.y / HEX_ROW) / zoom
+
+
 func _clamp_camera() -> void:
 	var world := Sim.world
 	if world == null:
 		return
-	var half := size / zoom * 0.5
+	var half := Vector2(size.x, size.y / HEX_ROW) / zoom * 0.5
 	camera.x = clampf(camera.x, -half.x * 0.5, float(world.w) + half.x * 0.5)
 	camera.y = clampf(camera.y, -half.y * 0.5, float(world.h) + half.y * 0.5)
 
 
-func _screen_to_tile(p: Vector2) -> Vector2:
-	return camera + (p - size * 0.5) / zoom
+## Hex-space position of a grid coordinate. Integer (x, y) is the *centre* of
+## hex (x, y); fractional parts move around within it. Odd rows step half a hex
+## right, which is the whole of the offset layout.
+func _hex_space(t: Vector2) -> Vector2:
+	var row := int(round(t.y))
+	return Vector2(t.x + 0.5 * float(row & 1), t.y * HEX_ROW)
 
 
+## Hex space -> screen. One hex is `zoom` pixels wide.
 func _tile_to_screen(t: Vector2) -> Vector2:
-	return (t - camera) * zoom + size * 0.5
+	return (_hex_space(t) - _hex_space(camera)) * zoom + size * 0.5
+
+
+## Screen -> the hex under it. Un-squash, convert to axial, round in cube space
+## - the same arithmetic the terrain shader does, so what you click is exactly
+## what you see.
+func _screen_to_tile(p: Vector2) -> Vector2:
+	var d := (p - size * 0.5) / zoom + _hex_space(camera)
+	d.y /= ISO_SQUASH
+	var s := 1.0 / sqrt(3.0)
+	var q := (sqrt(3.0) / 3.0 * d.x - d.y / 3.0) / s
+	var r := (2.0 / 3.0 * d.y) / s
+	var c := _cube_round(Vector3(q, -q - r, r))
+	var row := c.z
+	return Vector2(c.x + floorf((row - fposmod(row, 2.0)) * 0.5), row)
+
+
+## The bounding box of one hex, for tile fills and terrain sprites. A hex is as
+## wide as the zoom and HEX_H times that tall, centred on the hex.
+func _hex_rect(x: int, y: int) -> Rect2:
+	var box := Vector2(zoom, zoom * HEX_H)
+	return Rect2(_tile_to_screen(Vector2(x, y)) - box * 0.5, box)
+
+
+## The territory boundary. A circle in tile space, which the hex row spacing and
+## the isometric squash together turn into an ellipse - so it is walked as
+## points rather than handed to draw_arc, which only knows about circles.
+func _draw_territory_ring(home: Vector2, radius: float) -> void:
+	var pts := PackedVector2Array()
+	for i in 65:
+		var a := TAU * float(i) / 64.0
+		pts.append(home + Vector2(cos(a) * radius * zoom,
+				sin(a) * radius * zoom * HEX_ROW))
+	_overlay.draw_polyline(pts, TERRITORY_LINE, maxf(1.0, zoom * 0.05), true)
+
+
+func _cube_round(c: Vector3) -> Vector3:
+	var r := c.round()
+	var d := (r - c).abs()
+	if d.x > d.y and d.x > d.z:
+		r.x = -r.y - r.z
+	elif d.y > d.z:
+		r.y = -r.x - r.z
+	else:
+		r.z = -r.x - r.y
+	return r
 
 
 ## Frame the whole world.
@@ -206,7 +320,9 @@ func view_world() -> void:
 	var world := Sim.world
 	if world == null:
 		return
-	zoom = clampf(minf(size.x / float(world.w), size.y / float(world.h)), MIN_ZOOM, MAX_ZOOM)
+	# The hex field is (w + 0.5) hexes wide and h * HEX_ROW tall in hex space.
+	zoom = clampf(minf(size.x / (float(world.w) + 0.5),
+			size.y / (float(world.h) * HEX_ROW)), MIN_ZOOM, MAX_ZOOM)
 	camera = Vector2(world.w, world.h) * 0.5
 	_dirty = true
 
@@ -216,7 +332,7 @@ func view_home() -> void:
 	var world := Sim.world
 	if world == null:
 		return
-	zoom = 13.0
+	zoom = 30.0
 	camera = Vector2(world.origin)
 	_dirty = true
 
@@ -308,28 +424,42 @@ func _filter_tint(world: CivWorld, i: int, base: Color) -> Color:
 
 # --- Drawing ----------------------------------------------------------------
 
-func _draw() -> void:
+## Push the camera into the terrain shader. The hex field is drawn entirely from
+## these two vectors, so panning and zooming cost nothing but this.
+func _sync_terrain_shader() -> void:
+	var world := Sim.world
+	if world == null or _terrain_layer == null:
+		return
+	var mat: ShaderMaterial = _terrain_layer.material
+	if mat == null:
+		return
+	if _terrain_dirty or _tex == null:
+		_rebuild_terrain()
+	var origin := _hex_space(camera) - size * 0.5 / zoom
+	mat.set_shader_parameter("grid", _tex)
+	mat.set_shader_parameter("grid_dims", Vector2(world.w, world.h))
+	mat.set_shader_parameter("origin_hex", origin)
+	mat.set_shader_parameter("span_hex", size / zoom)
+	mat.set_shader_parameter("iso_squash", ISO_SQUASH)
+
+
+func draw_overlay() -> void:
 	var world := Sim.world
 	if world == null:
 		return
-	_dirty = false
-	if _terrain_dirty or _tex == null:
-		_rebuild_terrain()
-
-	draw_rect(Rect2(Vector2.ZERO, size), Color("0a0c0f"))
-
-	# The entire map: one draw call.
-	var top_left := _tile_to_screen(Vector2.ZERO)
-	draw_texture_rect(_tex, Rect2(top_left, Vector2(world.w, world.h) * zoom), false)
 
 	# Which tiles are actually on screen. Everything below iterates this, not
-	# the map, so cost is bounded by the window rather than the world.
-	var lo := _screen_to_tile(Vector2.ZERO).floor()
-	var hi := _screen_to_tile(size).ceil()
-	var x0 := maxi(0, int(lo.x))
-	var y0 := maxi(0, int(lo.y))
-	var x1 := mini(world.w - 1, int(hi.x))
-	var y1 := mini(world.h - 1, int(hi.y))
+	# the map, so cost is bounded by the window rather than the world. The four
+	# screen corners bound the visible hexes; on a hex grid the box is a little
+	# generous, which is fine and much cheaper than being exact.
+	var c0 := _screen_to_tile(Vector2.ZERO)
+	var c1 := _screen_to_tile(Vector2(size.x, 0.0))
+	var c2 := _screen_to_tile(Vector2(0.0, size.y))
+	var c3 := _screen_to_tile(size)
+	var x0 := maxi(0, int(minf(minf(c0.x, c1.x), minf(c2.x, c3.x))) - 1)
+	var y0 := maxi(0, int(minf(minf(c0.y, c1.y), minf(c2.y, c3.y))) - 1)
+	var x1 := mini(world.w - 1, int(maxf(maxf(c0.x, c1.x), maxf(c2.x, c3.x))) + 1)
+	var y1 := mini(world.h - 1, int(maxf(maxf(c0.y, c1.y), maxf(c2.y, c3.y))) + 1)
 
 	# Terrain sprites, if any have been dropped in. The colour texture underneath
 	# stays - it carries the fog states - and these go on top, only for tiles
@@ -346,9 +476,8 @@ func _draw() -> void:
 		_draw_territory_overlay(world, x0, y0, x1, y1)
 
 	# Territory ring.
-	var home := _tile_to_screen(Vector2(world.origin) + Vector2(0.5, 0.5))
-	draw_arc(home, world.territory_radius * zoom, 0.0, TAU, 64, TERRITORY_LINE,
-			maxf(1.0, zoom * 0.06), true)
+	var home := _tile_to_screen(Vector2(world.origin))
+	_draw_territory_ring(home, world.territory_radius)
 
 	_draw_settlement(home)
 	if zoom >= DETAIL_ZOOM:
@@ -377,10 +506,17 @@ func _draw_wildlife(world: CivWorld, x0: int, y0: int, x1: int, y1: int) -> void
 			continue
 		var kind: int = world.animal_kind[a]
 		var info: Dictionary = Balance.ANIMALS[kind]
-		var jitter := _scatter[(i + a) % _scatter.size()] * 0.26
-		var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.55) + jitter)
-		_draw_fauna(p, zoom * 0.40, kind, info["color"])
-		drawn += 1
+		# How many are actually here. A herd is a quantity, and this is the only
+		# place in the game that quantity is visible - so draw it, at the stated
+		# scale, the same way the population is drawn.
+		var head: float = world.game[i] * Balance.ANIMALS_PER_GAME_UNIT * float(info["weight"])
+		var icons := clampi(int(round(head / Balance.ANIMALS_PER_ICON)), 1,
+				mini(Balance.MAX_ANIMAL_ICONS_PER_TILE, MAX_ANIMAL_MARKS - drawn))
+		for k in icons:
+			var jitter := _scatter[(i * 11 + a * 5 + k * 23) % _scatter.size()] * 0.40
+			var p := _tile_to_screen(Vector2(t) + jitter)
+			_draw_fauna(p, zoom * 0.26, kind, info["color"])
+			drawn += 1
 
 
 ## Ore and gold, once the tribe knows how to recognise them.
@@ -393,12 +529,12 @@ func _draw_seams(world: CivWorld, x0: int, y0: int, x1: int, y1: int) -> void:
 			var i := world.idx(x, y)
 			if world.observed[i] == 0:
 				continue
-			var p := _tile_to_screen(Vector2(x, y) + Vector2(0.5, 0.5))
+			var p := _tile_to_screen(Vector2(x, y))
 			if world.ore[i] > 0.35:
 				var s := zoom * 0.13
-				draw_rect(Rect2(p - Vector2(s, s) - Vector2(zoom * 0.22, 0), Vector2(s, s) * 2.0), ore_col, true)
+				_overlay.draw_rect(Rect2(p - Vector2(s, s) - Vector2(zoom * 0.22, 0), Vector2(s, s) * 2.0), ore_col, true)
 			if world.gold[i] > 0.16:
-				draw_circle(p + Vector2(zoom * 0.22, -zoom * 0.18), zoom * 0.10, Color("e3c14f"))
+				_overlay.draw_circle(p + Vector2(zoom * 0.22, -zoom * 0.18), zoom * 0.10, Color("e3c14f"))
 
 
 # --- Animal silhouettes -----------------------------------------------------
@@ -409,37 +545,37 @@ func _draw_seams(world: CivWorld, x0: int, y0: int, x1: int, y1: int) -> void:
 func _draw_fauna(p: Vector2, s: float, kind: int, col: Color) -> void:
 	match kind:
 		Balance.Animal.DEER:
-			draw_colored_polygon(PackedVector2Array([
+			_overlay.draw_colored_polygon(PackedVector2Array([
 				p + Vector2(-s * 0.7, -s * 0.05), p + Vector2(s * 0.45, -s * 0.2),
 				p + Vector2(s * 0.45, s * 0.4), p + Vector2(-s * 0.65, s * 0.4),
 			]), col)
 			var head := p + Vector2(s * 0.6, -s * 0.4)
-			draw_line(p + Vector2(s * 0.45, -s * 0.15), head, col, maxf(1.0, s * 0.22))
+			_overlay.draw_line(p + Vector2(s * 0.45, -s * 0.15), head, col, maxf(1.0, s * 0.22))
 			# Antlers - the tell.
-			draw_line(head, head + Vector2(-s * 0.3, -s * 0.6), col, maxf(1.0, s * 0.15))
-			draw_line(head, head + Vector2(s * 0.35, -s * 0.55), col, maxf(1.0, s * 0.15))
+			_overlay.draw_line(head, head + Vector2(-s * 0.3, -s * 0.6), col, maxf(1.0, s * 0.15))
+			_overlay.draw_line(head, head + Vector2(s * 0.35, -s * 0.55), col, maxf(1.0, s * 0.15))
 		Balance.Animal.WOLF:
 			# Long, low, level back; brush tail up; muzzle out front.
-			draw_colored_polygon(PackedVector2Array([
+			_overlay.draw_colored_polygon(PackedVector2Array([
 				p + Vector2(-s * 0.75, -s * 0.05), p + Vector2(s * 0.5, -s * 0.1),
 				p + Vector2(s * 0.5, s * 0.3), p + Vector2(-s * 0.7, s * 0.32),
 			]), col)
-			draw_colored_polygon(PackedVector2Array([
+			_overlay.draw_colored_polygon(PackedVector2Array([
 				p + Vector2(s * 0.45, -s * 0.2), p + Vector2(s * 1.0, s * 0.05),
 				p + Vector2(s * 0.45, s * 0.18),
 			]), col)
 			# Ears and tail.
-			draw_line(p + Vector2(s * 0.5, -s * 0.15), p + Vector2(s * 0.42, -s * 0.5), col, maxf(1.0, s * 0.16))
-			draw_line(p + Vector2(-s * 0.72, 0.0), p + Vector2(-s * 1.15, -s * 0.45), col, maxf(1.0, s * 0.26))
+			_overlay.draw_line(p + Vector2(s * 0.5, -s * 0.15), p + Vector2(s * 0.42, -s * 0.5), col, maxf(1.0, s * 0.16))
+			_overlay.draw_line(p + Vector2(-s * 0.72, 0.0), p + Vector2(-s * 1.15, -s * 0.45), col, maxf(1.0, s * 0.26))
 		Balance.Animal.RABBIT:
-			draw_circle(p + Vector2(0, s * 0.12), s * 0.38, col)
-			draw_circle(p + Vector2(s * 0.3, -s * 0.15), s * 0.2, col)
+			_overlay.draw_circle(p + Vector2(0, s * 0.12), s * 0.38, col)
+			_overlay.draw_circle(p + Vector2(s * 0.3, -s * 0.15), s * 0.2, col)
 			# Ears.
-			draw_line(p + Vector2(s * 0.26, -s * 0.28), p + Vector2(s * 0.18, -s * 0.85), col, maxf(1.0, s * 0.15))
-			draw_line(p + Vector2(s * 0.38, -s * 0.28), p + Vector2(s * 0.5, -s * 0.8), col, maxf(1.0, s * 0.15))
+			_overlay.draw_line(p + Vector2(s * 0.26, -s * 0.28), p + Vector2(s * 0.18, -s * 0.85), col, maxf(1.0, s * 0.15))
+			_overlay.draw_line(p + Vector2(s * 0.38, -s * 0.28), p + Vector2(s * 0.5, -s * 0.8), col, maxf(1.0, s * 0.15))
 		Balance.Animal.BIRD:
-			draw_line(p + Vector2(-s * 0.8, s * 0.12), p, col, maxf(1.0, s * 0.22))
-			draw_line(p, p + Vector2(s * 0.8, s * 0.12), col, maxf(1.0, s * 0.22))
+			_overlay.draw_line(p + Vector2(-s * 0.8, s * 0.12), p, col, maxf(1.0, s * 0.22))
+			_overlay.draw_line(p, p + Vector2(s * 0.8, s * 0.12), col, maxf(1.0, s * 0.22))
 
 
 # --- Workers ----------------------------------------------------------------
@@ -457,6 +593,7 @@ func _draw_workers(world: CivWorld) -> void:
 	var per := _people_per_figure()
 	var budget := MAX_WORKER_MARKS
 	var crowd_mode := filter == Balance.MapFilter.PEOPLE
+	var workforce := maxi(1, Sim.workforce())
 
 	for job_id in Balance.JOB_ORDER:
 		if budget <= 0:
@@ -469,19 +606,27 @@ func _draw_workers(world: CivWorld) -> void:
 			continue
 		var job: Dictionary = Balance.JOBS[job_id]
 		var col: Color = Balance.CROWD_COLOR if crowd_mode else job["color"]
-		# How many figures this trade is worth, capped so no single job floods.
-		var figures := clampi(int(ceil(float(n) / per)), 1, mini(14, budget))
+		# Figures for this trade, in proportion to its share of the workforce.
+		# A flat per-trade cap of fourteen used to be the real limit, so a town of
+		# two thousand and a city of forty thousand drew the same thin scattering
+		# and the map never looked populated. A figure is four small rects; a few
+		# hundred of them is nothing, and it is the difference between a map with
+		# people on it and a map with markers on it.
+		var share := float(n) / float(workforce)
+		var figures := clampi(int(ceil(float(n) / per)), 1,
+				maxi(1, mini(int(ceil(float(MAX_WORKER_MARKS) * share)), budget)))
 		for k in figures:
-			var i := spots[k % spots.size()]
+			var i := spots[(k * 3) % spots.size()]
 			var t := world.tile_pos(i)
-			# Scatter within the tile, so a tile genuinely holds a crowd.
-			var jitter := _scatter[(i * 7 + k * 13) % _scatter.size()] * 0.38
-			var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.55) + jitter)
+			# Scatter across the whole tile, not a huddle in the middle of it -
+			# the point is that one tile visibly holds a crowd.
+			var jitter := _scatter[(i * 7 + k * 13) % _scatter.size()] * 0.46
+			var p := _tile_to_screen(Vector2(t) + jitter)
 			if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
 				continue
 			var tex := Art.worker(job_id)
 			if tex != null and not crowd_mode:
-				Art.draw_centred(self, tex, p, zoom * 0.55)
+				Art.draw_centred(_overlay, tex, p, zoom * 0.30)
 			else:
 				_draw_person(p, zoom, col)
 			budget -= 1
@@ -491,14 +636,16 @@ func _draw_workers(world: CivWorld) -> void:
 ## and the colour of the trade. Legible at a glance, cheap to draw, and it
 ## scales down to a dot without becoming mush.
 func _draw_person(p: Vector2, tile: float, col: Color) -> void:
-	var px := maxf(1.0, tile * 0.085)
+	# A person is about five pixels tall at a comfortable zoom. Bigger than that
+	# and a crowd reads as a row of icons rather than as a crowd.
+	var px := maxf(1.0, tile * 0.05)
 	# head
-	draw_rect(Rect2(p.x - px * 0.5, p.y - px * 2.5, px, px), col.lightened(0.25), true)
+	_overlay.draw_rect(Rect2(p.x - px * 0.5, p.y - px * 2.5, px, px), col.lightened(0.25), true)
 	# body, two pixels tall
-	draw_rect(Rect2(p.x - px * 0.5, p.y - px * 1.5, px, px * 2.0), col, true)
+	_overlay.draw_rect(Rect2(p.x - px * 0.5, p.y - px * 1.5, px, px * 2.0), col, true)
 	# legs, split
-	draw_rect(Rect2(p.x - px, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
-	draw_rect(Rect2(p.x + px * 0.2, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
+	_overlay.draw_rect(Rect2(p.x - px, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
+	_overlay.draw_rect(Rect2(p.x + px * 0.2, p.y + px * 0.5, px * 0.8, px), col.darkened(0.25), true)
 
 
 ## Each figure stands for this many people. Steps rather than a smooth ratio, so
@@ -507,13 +654,16 @@ func _people_per_figure() -> float:
 	var pop := Sim.population
 	var steps: Array = Balance.PEOPLE_PER_FIGURE_STEPS
 	for i in range(steps.size() - 1, -1, -1):
-		if pop >= float(steps[i]) * 30.0:
+		# One figure per person holds until there are genuinely too many to draw.
+		# At a ratio of thirty this stepped up almost immediately and the map went
+		# sparse just as the settlement got interesting.
+		if pop >= float(steps[i]) * 240.0:
 			return float(steps[i])
 	return 1.0
 
 
 func _compute_worker_spots(world: CivWorld) -> void:
-	var home := PackedInt32Array([world.idx(world.origin.x, world.origin.y)])
+	var home := _home_spots(world)
 	for job_id in Balance.JOB_ORDER:
 		var field: String = Balance.JOBS[job_id]["field"]
 		match field:
@@ -526,6 +676,27 @@ func _compute_worker_spots(world: CivWorld) -> void:
 			"farm": _worker_spots[job_id] = world.best_tiles(world.fertility, 5)
 			"frontier": _worker_spots[job_id] = _frontier_spots(world)
 			_: _worker_spots[job_id] = home
+		# Every trade also shows some of its people at home. Work sites are the
+		# best few tiles for that resource and they can be right across the map,
+		# so zooming in on the settlement - the one place a player actually looks
+		# - used to show an empty village with all its people out of frame.
+		var spots: PackedInt32Array = _worker_spots[job_id]
+		if String(Balance.JOBS[job_id]["field"]) != "frontier":
+			spots.append_array(home)
+			_worker_spots[job_id] = spots
+
+
+## The settlement tile and the ring around it - where people are when they are
+## not at a work face.
+func _home_spots(world: CivWorld) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var x := world.origin.x + dx
+			var y := world.origin.y + dy
+			if world.in_bounds(x, y):
+				out.append(world.idx(x, y))
+	return out
 
 
 ## Explorers belong at the edge of the known world, not in the village.
@@ -546,62 +717,66 @@ func _frontier_spots(world: CivWorld) -> PackedInt32Array:
 func _draw_worker(p: Vector2, s: float, glyph: String, col: Color) -> void:
 	var dark := col.darkened(0.45)
 	# Body: everyone has one, so the eye reads "person" before "which person".
-	draw_circle(p + Vector2(0, -s * 0.55), s * 0.26, col)
-	draw_line(p + Vector2(0, -s * 0.32), p + Vector2(0, s * 0.35), col, maxf(1.0, s * 0.24))
+	_overlay.draw_circle(p + Vector2(0, -s * 0.55), s * 0.26, col)
+	_overlay.draw_line(p + Vector2(0, -s * 0.32), p + Vector2(0, s * 0.35), col, maxf(1.0, s * 0.24))
 
 	var tool_w := maxf(1.0, s * 0.20)
 	var right := p + Vector2(s * 0.30, -s * 0.10)
 	match glyph:
 		"bow":
-			draw_arc(right, s * 0.45, -1.2, 1.2, 8, dark, tool_w, true)
-			draw_line(right + Vector2(-s * 0.05, -s * 0.42), right + Vector2(-s * 0.05, s * 0.42), dark, tool_w * 0.7)
+			_overlay.draw_arc(right, s * 0.45, -1.2, 1.2, 8, dark, tool_w, true)
+			_overlay.draw_line(right + Vector2(-s * 0.05, -s * 0.42), right + Vector2(-s * 0.05, s * 0.42), dark, tool_w * 0.7)
 		"basket":
-			draw_rect(Rect2(right - Vector2(s * 0.30, 0.0), Vector2(s * 0.6, s * 0.42)), dark, true)
-			draw_arc(right, s * 0.30, PI, TAU, 6, dark, tool_w * 0.7)
+			_overlay.draw_rect(Rect2(right - Vector2(s * 0.30, 0.0), Vector2(s * 0.6, s * 0.42)), dark, true)
+			_overlay.draw_arc(right, s * 0.30, PI, TAU, 6, dark, tool_w * 0.7)
 		"axe":
-			draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.5), dark, tool_w)
-			draw_colored_polygon(PackedVector2Array([
+			_overlay.draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.5), dark, tool_w)
+			_overlay.draw_colored_polygon(PackedVector2Array([
 				right + Vector2(0, -s * 0.5), right + Vector2(s * 0.45, -s * 0.35),
 				right + Vector2(0, -s * 0.1),
 			]), dark)
 		"jug":
-			draw_circle(right + Vector2(0, s * 0.05), s * 0.32, dark)
-			draw_rect(Rect2(right - Vector2(s * 0.12, s * 0.45), Vector2(s * 0.24, s * 0.25)), dark, true)
+			_overlay.draw_circle(right + Vector2(0, s * 0.05), s * 0.32, dark)
+			_overlay.draw_rect(Rect2(right - Vector2(s * 0.12, s * 0.45), Vector2(s * 0.24, s * 0.25)), dark, true)
 		"staff":
 			# Explorer: a long walking staff, canted forward.
-			draw_line(right + Vector2(-s * 0.15, s * 0.5), right + Vector2(s * 0.25, -s * 0.7), dark, tool_w)
-			draw_circle(right + Vector2(s * 0.25, -s * 0.7), s * 0.16, dark)
+			_overlay.draw_line(right + Vector2(-s * 0.15, s * 0.5), right + Vector2(s * 0.25, -s * 0.7), dark, tool_w)
+			_overlay.draw_circle(right + Vector2(s * 0.25, -s * 0.7), s * 0.16, dark)
 		"hoe":
-			draw_line(right + Vector2(0, s * 0.45), right + Vector2(s * 0.1, -s * 0.5), dark, tool_w)
-			draw_line(right + Vector2(s * 0.1, -s * 0.5), right + Vector2(s * 0.5, -s * 0.42), dark, tool_w)
+			_overlay.draw_line(right + Vector2(0, s * 0.45), right + Vector2(s * 0.1, -s * 0.5), dark, tool_w)
+			_overlay.draw_line(right + Vector2(s * 0.1, -s * 0.5), right + Vector2(s * 0.5, -s * 0.42), dark, tool_w)
 		"chisel":
-			draw_rect(Rect2(right - Vector2(s * 0.08, s * 0.5), Vector2(s * 0.16, s * 0.8)), dark, true)
-			draw_colored_polygon(PackedVector2Array([
+			_overlay.draw_rect(Rect2(right - Vector2(s * 0.08, s * 0.5), Vector2(s * 0.16, s * 0.8)), dark, true)
+			_overlay.draw_colored_polygon(PackedVector2Array([
 				right + Vector2(-s * 0.08, s * 0.3), right + Vector2(s * 0.08, s * 0.3),
 				right + Vector2(0, s * 0.55),
 			]), dark)
 		"pick":
-			draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.45), dark, tool_w)
-			draw_arc(right + Vector2(0, -s * 0.45), s * 0.42, PI, TAU, 8, dark, tool_w * 0.8)
+			_overlay.draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.45), dark, tool_w)
+			_overlay.draw_arc(right + Vector2(0, -s * 0.45), s * 0.42, PI, TAU, 8, dark, tool_w * 0.8)
 		"hammer":
-			draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.35), dark, tool_w)
-			draw_rect(Rect2(right - Vector2(s * 0.32, s * 0.62), Vector2(s * 0.64, s * 0.30)), dark, true)
+			_overlay.draw_line(right + Vector2(0, s * 0.45), right + Vector2(0, -s * 0.35), dark, tool_w)
+			_overlay.draw_rect(Rect2(right - Vector2(s * 0.32, s * 0.62), Vector2(s * 0.64, s * 0.30)), dark, true)
 		"scroll":
-			draw_rect(Rect2(right - Vector2(s * 0.34, s * 0.28), Vector2(s * 0.68, s * 0.56)), dark, true)
-			draw_line(right + Vector2(-s * 0.2, -s * 0.08), right + Vector2(s * 0.2, -s * 0.08), col, tool_w * 0.5)
-			draw_line(right + Vector2(-s * 0.2, s * 0.10), right + Vector2(s * 0.2, s * 0.10), col, tool_w * 0.5)
+			_overlay.draw_rect(Rect2(right - Vector2(s * 0.34, s * 0.28), Vector2(s * 0.68, s * 0.56)), dark, true)
+			_overlay.draw_line(right + Vector2(-s * 0.2, -s * 0.08), right + Vector2(s * 0.2, -s * 0.08), col, tool_w * 0.5)
+			_overlay.draw_line(right + Vector2(-s * 0.2, s * 0.10), right + Vector2(s * 0.2, s * 0.10), col, tool_w * 0.5)
 
 
 # --- Settlement -------------------------------------------------------------
 
 func _draw_settlement(center: Vector2) -> void:
-	var s := maxf(zoom, 4.0)
+	# Buildings used to scale straight off zoom, so at the close zooms that make
+	# a crowd visible a single hut filled most of a tile and the map turned into
+	# furniture. A building is a thing standing *on* ground, not the ground - so
+	# it grows with zoom only up to the point where it reads, then stops.
+	var s := clampf(zoom, 4.0, 26.0)
 
 	if Sim.buildings.get("firepit", 0) > 0:
-		draw_circle(center, s * 0.40, Color("d96a2b"))
-		draw_circle(center, s * 0.20, Color("f2c15a"))
+		_overlay.draw_circle(center, s * 0.40, Color("d96a2b"))
+		_overlay.draw_circle(center, s * 0.20, Color("f2c15a"))
 	else:
-		draw_circle(center, s * 0.26, Color("3b332a"))
+		_overlay.draw_circle(center, s * 0.26, Color("3b332a"))
 
 	# One mark per building up to a budget, then the settlement just reads as
 	# dense - which is the right visual answer for a city of two hundred huts.
@@ -636,33 +811,33 @@ func _draw_group(center: Vector2, s: float, id: String, slot: int, color: Color,
 		slot += 1
 		match shape:
 			"tent":
-				draw_colored_polygon(PackedVector2Array([
+				_overlay.draw_colored_polygon(PackedVector2Array([
 					p + Vector2(-s * 0.24, s * 0.20), p + Vector2(s * 0.24, s * 0.20),
 					p + Vector2(0, -s * 0.24),
 				]), color)
 			"hut":
-				draw_rect(Rect2(p - Vector2(s * 0.22, s * 0.16), Vector2(s * 0.44, s * 0.36)), color, true)
-				draw_colored_polygon(PackedVector2Array([
+				_overlay.draw_rect(Rect2(p - Vector2(s * 0.22, s * 0.16), Vector2(s * 0.44, s * 0.36)), color, true)
+				_overlay.draw_colored_polygon(PackedVector2Array([
 					p + Vector2(-s * 0.28, -s * 0.14), p + Vector2(s * 0.28, -s * 0.14),
 					p + Vector2(0, -s * 0.42),
 				]), color.darkened(0.25))
 			"long":
-				draw_rect(Rect2(p - Vector2(s * 0.48, s * 0.18), Vector2(s * 0.96, s * 0.36)), color, true)
+				_overlay.draw_rect(Rect2(p - Vector2(s * 0.48, s * 0.18), Vector2(s * 0.96, s * 0.36)), color, true)
 			"field":
 				var r := Rect2(p - Vector2(s * 0.36, s * 0.24), Vector2(s * 0.72, s * 0.48))
-				draw_rect(r, color, true)
-				draw_rect(r, color.darkened(0.4), false, maxf(1.0, s * 0.04))
+				_overlay.draw_rect(r, color, true)
+				_overlay.draw_rect(r, color.darkened(0.4), false, maxf(1.0, s * 0.04))
 			"well":
-				draw_circle(p, s * 0.20, color)
-				draw_circle(p, s * 0.10, Color("24404f"))
+				_overlay.draw_circle(p, s * 0.20, color)
+				_overlay.draw_circle(p, s * 0.10, Color("24404f"))
 			"mine":
-				draw_rect(Rect2(p - Vector2(s * 0.22, s * 0.08), Vector2(s * 0.44, s * 0.28)), color, true)
-				draw_colored_polygon(PackedVector2Array([
+				_overlay.draw_rect(Rect2(p - Vector2(s * 0.22, s * 0.08), Vector2(s * 0.44, s * 0.28)), color, true)
+				_overlay.draw_colored_polygon(PackedVector2Array([
 					p + Vector2(-s * 0.22, -s * 0.08), p + Vector2(s * 0.22, -s * 0.08),
 					p + Vector2(0, -s * 0.32),
 				]), Color("2a2320"))
 			"shrine":
-				draw_colored_polygon(PackedVector2Array([
+				_overlay.draw_colored_polygon(PackedVector2Array([
 					p + Vector2(-s * 0.18, s * 0.24), p + Vector2(s * 0.18, s * 0.24),
 					p + Vector2(0, -s * 0.36),
 				]), color)
@@ -683,7 +858,7 @@ func _draw_territory_overlay(world: CivWorld, x0: int, y0: int, x1: int, y1: int
 			elif world.explored[i] != 0:
 				col = Color(0.4, 0.55, 0.7, 0.12)
 			if col.a > 0.0:
-				draw_rect(Rect2(_tile_to_screen(Vector2(x, y)), Vector2(zoom, zoom) + Vector2.ONE),
+				_overlay.draw_rect(_hex_rect(x, y),
 						col, true)
 
 
@@ -692,22 +867,22 @@ func _draw_territory_overlay(world: CivWorld, x0: int, y0: int, x1: int, y1: int
 func _draw_outposts(world: CivWorld) -> void:
 	for o in Sim.outposts:
 		var t := world.tile_pos(int(o["tile"]))
-		var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+		var p := _tile_to_screen(Vector2(t))
 		if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
 			continue
 		var s := maxf(zoom, 6.0)
 		var tex := Art.ui("outpost")
 		if tex != null:
-			Art.draw_centred(self, tex, p, s)
-			draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
+			Art.draw_centred(_overlay, tex, p, s)
+			_overlay.draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
 			continue
-		draw_rect(Rect2(p - Vector2(s * 0.3, s * 0.22), Vector2(s * 0.6, s * 0.44)),
+		_overlay.draw_rect(Rect2(p - Vector2(s * 0.3, s * 0.22), Vector2(s * 0.6, s * 0.44)),
 				Color("c9b06a"), true)
-		draw_colored_polygon(PackedVector2Array([
+		_overlay.draw_colored_polygon(PackedVector2Array([
 			p + Vector2(-s * 0.36, -s * 0.2), p + Vector2(s * 0.36, -s * 0.2),
 			p + Vector2(0, -s * 0.55),
 		]), Color("8a7448"))
-		draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
+		_overlay.draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
 
 
 ## While placing, shade every tile that would actually take an outpost. The
@@ -724,7 +899,7 @@ func _draw_placement(world: CivWorld) -> void:
 			if world.explored[i] == 0 or not Sim.can_found_outpost(i):
 				continue
 			shown += 1
-			draw_rect(Rect2(_tile_to_screen(Vector2(x, y)), Vector2(zoom, zoom)),
+			_overlay.draw_rect(_hex_rect(x, y),
 					Color(0.85, 0.75, 0.4, 0.22), true)
 
 
@@ -745,8 +920,7 @@ func _draw_terrain_sprites(world: CivWorld, x0: int, y0: int, x1: int, y1: int) 
 			# Unwatched ground is dimmed the same way the colour layer is, so the
 			# fog reads identically whether or not there is artwork.
 			var tint := Color.WHITE if world.observed[i] != 0 else Color(0.5, 0.55, 0.6, 0.85)
-			draw_texture_rect(tex, Rect2(_tile_to_screen(Vector2(x, y)),
-					Vector2(zoom, zoom) + Vector2.ONE), false, tint)
+			_overlay.draw_texture_rect(tex, _hex_rect(x, y).grow(1.0), false, tint)
 			drawn += 1
 
 
@@ -759,7 +933,7 @@ func _draw_boon(world: CivWorld) -> void:
 	if Sim.boon_id == "" or Sim.boon_tile < 0:
 		return
 	var t := world.tile_pos(Sim.boon_tile)
-	var centre := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.5))
+	var centre := _tile_to_screen(Vector2(t))
 	if centre.x < -40.0 or centre.y < -40.0 or centre.x > size.x + 40.0 or centre.y > size.y + 40.0:
 		return
 	var col: Color = Balance.BOONS[Sim.boon_id]["color"]
@@ -767,13 +941,13 @@ func _draw_boon(world: CivWorld) -> void:
 	var r := maxf(12.0, zoom * 0.75)
 	var tex := Art.ui("boon_" + Sim.boon_id)
 	if tex != null:
-		Art.draw_centred(self, tex, centre, r * 1.6)
-		draw_arc(centre, r, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
+		Art.draw_centred(_overlay, tex, centre, r * 1.6)
+		_overlay.draw_arc(centre, r, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
 		return
-	draw_arc(centre, r, 0.0, TAU, 28, Color(col.r, col.g, col.b, 0.35), 3.0, true)
+	_overlay.draw_arc(centre, r, 0.0, TAU, 28, Color(col.r, col.g, col.b, 0.35), 3.0, true)
 	# The inner arc empties as the moment passes.
-	draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
-	draw_circle(centre, r * 0.22, col)
+	_overlay.draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
+	_overlay.draw_circle(centre, r * 0.22, col)
 
 
 # --- Legend -----------------------------------------------------------------
@@ -792,23 +966,30 @@ func _draw_legend() -> void:
 	# Backing strip. Terrain sprites brought the map up to full brightness and
 	# the legend became unreadable over grassland and sand - white-ish text on a
 	# pale tile. One flat rect is cheaper than outlining every glyph.
-	var strip := 26.0 if per <= 1.0 else 40.0
-	draw_rect(Rect2(0.0, size.y - strip, size.x, strip), Color(0.05, 0.06, 0.07, 0.72), true)
+	var strip := 40.0
+	_overlay.draw_rect(Rect2(0.0, size.y - strip, size.x, strip), Color(0.05, 0.06, 0.07, 0.72), true)
+	var scale_note := ""
 	if per > 1.0:
-		draw_string(font, Vector2(x, y - 20.0), "one figure = %s people" % Balance.fmt_count(per),
+		scale_note = "one figure = %s people" % Balance.fmt_count(per)
+	if zoom >= ANIMAL_ZOOM:
+		if scale_note != "":
+			scale_note += "   -   "
+		scale_note += "one animal = %s head" % Balance.fmt_count(Balance.ANIMALS_PER_ICON)
+	if scale_note != "":
+		_overlay.draw_string(font, Vector2(x, y - 20.0), scale_note,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.72, 0.74, 0.72))
 	# The legend has to answer the question the current filter is asking. Listing
 	# five trades under a map that has deliberately stopped distinguishing trades
 	# is worse than listing nothing.
 	if filter == Balance.MapFilter.PEOPLE:
 		_draw_person(Vector2(x + 7.0, y - 6.0), 60.0, Balance.CROWD_COLOR)
-		draw_string(font, Vector2(x + 17.0, y - 3.0),
+		_overlay.draw_string(font, Vector2(x + 17.0, y - 3.0),
 				"%s people" % Balance.fmt_count(Sim.population),
 				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Balance.CROWD_COLOR)
 		return
 	if filter != Balance.MapFilter.TRADES:
 		var info: Dictionary = Balance.MAP_FILTERS[filter]
-		draw_string(font, Vector2(x, y - 3.0), String(info["desc"]),
+		_overlay.draw_string(font, Vector2(x, y - 3.0), String(info["desc"]),
 				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.78, 0.80, 0.78))
 		return
 
@@ -821,11 +1002,11 @@ func _draw_legend() -> void:
 		var job: Dictionary = Balance.JOBS[job_id]
 		var ltex := Art.worker(job_id)
 		if ltex != null:
-			Art.draw_centred(self, ltex, Vector2(x + 7.0, y - 9.0), 16.0)
+			Art.draw_centred(_overlay, ltex, Vector2(x + 7.0, y - 9.0), 16.0)
 		else:
 			_draw_worker(Vector2(x + 7.0, y - 9.0), 15.0, String(job["glyph"]), job["color"])
 		var label := "%s %s" % [job["name"], Balance.fmt_count(float(n))]
-		draw_string(font, Vector2(x + 17.0, y - 3.0), label,
+		_overlay.draw_string(font, Vector2(x + 17.0, y - 3.0), label,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, fs, job["color"])
 		x += 17.0 + font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x + 10.0
 		shown += 1
