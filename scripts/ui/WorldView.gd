@@ -33,10 +33,17 @@ const ANIMAL_ZOOM := 7.0
 const TERRAIN_SPRITE_ZOOM := 8.0
 const MAX_TERRAIN_SPRITES := 1400
 const MIN_ZOOM := 3.0
-const MAX_ZOOM := 26.0
+## A tile has to get big enough to hold a visible crowd. At the old ceiling of
+## 26 a person was about one pixel and the map could never show the thing the
+## people are drawn for; the terrain art is 32px native, so this also lets it
+## reach 1:1 and past it.
+const MAX_ZOOM := 84.0
 ## Hard ceiling on overlay primitives per frame, whatever the population.
 const MAX_ANIMAL_MARKS := 90
-const MAX_WORKER_MARKS := 44
+## A figure is four small filled rects. Several hundred of them costs nothing
+## next to the terrain pass, and a populated map is the whole point of drawing
+## people at all - so this budget is set by what looks right, not by fear.
+const MAX_WORKER_MARKS := 420
 
 var zoom: float = 13.0
 var camera := Vector2.ZERO  ## in tile coordinates
@@ -216,7 +223,7 @@ func view_home() -> void:
 	var world := Sim.world
 	if world == null:
 		return
-	zoom = 13.0
+	zoom = 30.0
 	camera = Vector2(world.origin)
 	_dirty = true
 
@@ -457,6 +464,7 @@ func _draw_workers(world: CivWorld) -> void:
 	var per := _people_per_figure()
 	var budget := MAX_WORKER_MARKS
 	var crowd_mode := filter == Balance.MapFilter.PEOPLE
+	var workforce := maxi(1, Sim.workforce())
 
 	for job_id in Balance.JOB_ORDER:
 		if budget <= 0:
@@ -469,19 +477,27 @@ func _draw_workers(world: CivWorld) -> void:
 			continue
 		var job: Dictionary = Balance.JOBS[job_id]
 		var col: Color = Balance.CROWD_COLOR if crowd_mode else job["color"]
-		# How many figures this trade is worth, capped so no single job floods.
-		var figures := clampi(int(ceil(float(n) / per)), 1, mini(14, budget))
+		# Figures for this trade, in proportion to its share of the workforce.
+		# A flat per-trade cap of fourteen used to be the real limit, so a town of
+		# two thousand and a city of forty thousand drew the same thin scattering
+		# and the map never looked populated. A figure is four small rects; a few
+		# hundred of them is nothing, and it is the difference between a map with
+		# people on it and a map with markers on it.
+		var share := float(n) / float(workforce)
+		var figures := clampi(int(ceil(float(n) / per)), 1,
+				maxi(1, mini(int(ceil(float(MAX_WORKER_MARKS) * share)), budget)))
 		for k in figures:
-			var i := spots[k % spots.size()]
+			var i := spots[(k * 3) % spots.size()]
 			var t := world.tile_pos(i)
-			# Scatter within the tile, so a tile genuinely holds a crowd.
-			var jitter := _scatter[(i * 7 + k * 13) % _scatter.size()] * 0.38
+			# Scatter across the whole tile, not a huddle in the middle of it -
+			# the point is that one tile visibly holds a crowd.
+			var jitter := _scatter[(i * 7 + k * 13) % _scatter.size()] * 0.46
 			var p := _tile_to_screen(Vector2(t) + Vector2(0.5, 0.55) + jitter)
 			if p.x < -20.0 or p.y < -20.0 or p.x > size.x + 20.0 or p.y > size.y + 20.0:
 				continue
 			var tex := Art.worker(job_id)
 			if tex != null and not crowd_mode:
-				Art.draw_centred(self, tex, p, zoom * 0.55)
+				Art.draw_centred(self, tex, p, zoom * 0.30)
 			else:
 				_draw_person(p, zoom, col)
 			budget -= 1
@@ -491,7 +507,9 @@ func _draw_workers(world: CivWorld) -> void:
 ## and the colour of the trade. Legible at a glance, cheap to draw, and it
 ## scales down to a dot without becoming mush.
 func _draw_person(p: Vector2, tile: float, col: Color) -> void:
-	var px := maxf(1.0, tile * 0.085)
+	# A person is about five pixels tall at a comfortable zoom. Bigger than that
+	# and a crowd reads as a row of icons rather than as a crowd.
+	var px := maxf(1.0, tile * 0.05)
 	# head
 	draw_rect(Rect2(p.x - px * 0.5, p.y - px * 2.5, px, px), col.lightened(0.25), true)
 	# body, two pixels tall
@@ -507,13 +525,16 @@ func _people_per_figure() -> float:
 	var pop := Sim.population
 	var steps: Array = Balance.PEOPLE_PER_FIGURE_STEPS
 	for i in range(steps.size() - 1, -1, -1):
-		if pop >= float(steps[i]) * 30.0:
+		# One figure per person holds until there are genuinely too many to draw.
+		# At a ratio of thirty this stepped up almost immediately and the map went
+		# sparse just as the settlement got interesting.
+		if pop >= float(steps[i]) * 240.0:
 			return float(steps[i])
 	return 1.0
 
 
 func _compute_worker_spots(world: CivWorld) -> void:
-	var home := PackedInt32Array([world.idx(world.origin.x, world.origin.y)])
+	var home := _home_spots(world)
 	for job_id in Balance.JOB_ORDER:
 		var field: String = Balance.JOBS[job_id]["field"]
 		match field:
@@ -526,6 +547,27 @@ func _compute_worker_spots(world: CivWorld) -> void:
 			"farm": _worker_spots[job_id] = world.best_tiles(world.fertility, 5)
 			"frontier": _worker_spots[job_id] = _frontier_spots(world)
 			_: _worker_spots[job_id] = home
+		# Every trade also shows some of its people at home. Work sites are the
+		# best few tiles for that resource and they can be right across the map,
+		# so zooming in on the settlement - the one place a player actually looks
+		# - used to show an empty village with all its people out of frame.
+		var spots: PackedInt32Array = _worker_spots[job_id]
+		if String(Balance.JOBS[job_id]["field"]) != "frontier":
+			spots.append_array(home)
+			_worker_spots[job_id] = spots
+
+
+## The settlement tile and the ring around it - where people are when they are
+## not at a work face.
+func _home_spots(world: CivWorld) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var x := world.origin.x + dx
+			var y := world.origin.y + dy
+			if world.in_bounds(x, y):
+				out.append(world.idx(x, y))
+	return out
 
 
 ## Explorers belong at the edge of the known world, not in the village.
@@ -595,7 +637,11 @@ func _draw_worker(p: Vector2, s: float, glyph: String, col: Color) -> void:
 # --- Settlement -------------------------------------------------------------
 
 func _draw_settlement(center: Vector2) -> void:
-	var s := maxf(zoom, 4.0)
+	# Buildings used to scale straight off zoom, so at the close zooms that make
+	# a crowd visible a single hut filled most of a tile and the map turned into
+	# furniture. A building is a thing standing *on* ground, not the ground - so
+	# it grows with zoom only up to the point where it reads, then stops.
+	var s := clampf(zoom, 4.0, 26.0)
 
 	if Sim.buildings.get("firepit", 0) > 0:
 		draw_circle(center, s * 0.40, Color("d96a2b"))

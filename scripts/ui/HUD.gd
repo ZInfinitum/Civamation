@@ -135,6 +135,11 @@ func _fit_to_viewport() -> void:
 
 
 func _process(delta: float) -> void:
+	# The clock is the one thing that has to look continuous, so it runs every
+	# frame while the rest of the interface stays on the 10Hz tick. It is a
+	# single Label assignment - the panels behind it are what cost anything.
+	_day_label.text = Balance.fmt_clock(Sim.day)
+
 	_refresh_accum += delta
 	if _refresh_accum < 0.1:
 		return
@@ -1034,7 +1039,7 @@ func _refresh_summary() -> void:
 
 func _refresh_top() -> void:
 	_era_label.text = Sim.era_name()
-	_day_label.text = "Day %s" % Balance.fmt_count(floorf(Sim.day) + 1.0)
+	_day_label.text = Balance.fmt_clock(Sim.day)
 	_pop_label.text = "%s people" % Balance.fmt_count(Sim.population)
 	var top := Sim.max_speed_index()
 	for i in _speed_buttons.size():

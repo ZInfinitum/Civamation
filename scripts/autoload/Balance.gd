@@ -1537,6 +1537,20 @@ static func fmt_count(value: float) -> String:
 	return out
 
 
+## The date, as a running clock: "412 days, 14:23:07".
+##
+## `day` is a float and always has been - the fractional part is the time of
+## day, it just was never shown. A settlement that ticks a bare day counter
+## looks stopped between days; one with a second hand is visibly alive even
+## paused, and at thirty seconds to the day the clock moves at roughly fifty
+## times real time, which reads as a place going about its business.
+static func fmt_clock(day: float) -> String:
+	var whole := floorf(maxf(day, 0.0))
+	var secs := int((maxf(day, 0.0) - whole) * 86400.0)
+	return "%s days, %02d:%02d:%02d" % [fmt_count(whole + 1.0),
+			secs / 3600, (secs / 60) % 60, secs % 60]
+
+
 ## Format a per-day rate with an explicit sign.
 static func fmt_rate(value: float) -> String:
 	var s := "+" if value >= 0.0 else "-"
