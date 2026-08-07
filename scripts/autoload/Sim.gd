@@ -28,6 +28,20 @@ signal ascended(points: float)
 signal council_opened(id: String)
 signal council_closed(id: String, choice: String, by_elders: bool)
 
+## The simulation's own random source, seeded from the world seed.
+##
+## Everything used to draw on the global RNG, which Godot seeds from the system
+## at startup. World *generation* was always seeded properly, so two players
+## entering the same seed got the same map - and then a completely different
+## game on top of it, because every event, boon, council question, disaster and
+## notable name came from somewhere else entirely. That makes a shared seed
+## almost meaningless, and it made the balance harness unable to reproduce its
+## own results: the numbers it printed changed every run.
+##
+## Its state is saved, so reloading continues the same sequence rather than
+## forking into a new one.
+var rng := RandomNumberGenerator.new()
+
 var world: CivWorld
 
 var day: float = 0.0
@@ -186,10 +200,14 @@ func _ready() -> void:
 
 func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	if p_seed == 0:
+		# The one deliberate use of the global RNG: choosing a seed is the act of
+		# not having one. Everything after this line is reproducible from it.
 		p_seed = randi() % 1_000_000 + 1
 
 	world = CivWorld.new()
 	world.generate(p_seed, p_type)
+	# Offset so the simulation's stream is not the terrain generator's stream.
+	rng.seed = hash("civamation-sim:%d:%d" % [p_seed, p_type])
 
 	day = 0.0
 	population = 6.0
@@ -508,9 +526,9 @@ func _on_revealed(i: int, offline: bool) -> void:
 		return
 	# Somebody was here first. The rarest thing the frontier turns up, and the
 	# only one that can hand you a whole idea at once.
-	if randf() < 0.004 and _seen_biomes.size() > 2:
+	if rng.randf() < 0.004 and _seen_biomes.size() > 2:
 		var target := researching if researching != "" else _cheapest_available()
-		if target != "" and randf() < 0.35:
+		if target != "" and rng.randf() < 0.35:
 			resources["knowledge"] += float(Balance.TECHS[target]["cost"])
 			add_log("Ruins. Someone was here long before you, and left enough behind "
 					+ "to finish a thought your elders had started.", "tech")
@@ -579,11 +597,11 @@ func _maybe_boon(dt: float) -> void:
 	_boon_cooldown -= dt
 	if _boon_cooldown > 0.0:
 		return
-	_boon_cooldown = Balance.BOON_INTERVAL_DAYS * randf_range(0.65, 1.45)
+	_boon_cooldown = Balance.BOON_INTERVAL_DAYS * rng.randf_range(0.65, 1.45)
 	if world.territory.is_empty():
 		return
-	boon_id = Balance.BOON_ORDER[randi() % Balance.BOON_ORDER.size()]
-	boon_tile = world.territory[randi() % world.territory.size()]
+	boon_id = Balance.BOON_ORDER[rng.randi() % Balance.BOON_ORDER.size()]
+	boon_tile = world.territory[rng.randi() % world.territory.size()]
 	boon_expires = day + Balance.BOON_LIFETIME_DAYS
 	add_log("%s. %s" % [Balance.BOONS[boon_id]["name"], Balance.BOONS[boon_id]["text"]], "good")
 	boon_appeared.emit(boon_id)
@@ -744,7 +762,7 @@ func _maybe_disaster(dt: float, offline: bool) -> void:
 		return
 	var freq: Dictionary = Balance.DISASTER_FREQUENCY[clampi(Settings.disaster_frequency, 0,
 			Balance.DISASTER_FREQUENCY.size() - 1)]
-	_disaster_cooldown = Balance.DISASTER_INTERVAL_DAYS * float(freq["scale"]) * randf_range(0.6, 1.5)
+	_disaster_cooldown = Balance.DISASTER_INTERVAL_DAYS * float(freq["scale"]) * rng.randf_range(0.6, 1.5)
 
 	var choices: Array[String] = []
 	for id in Balance.DISASTERS:
@@ -752,7 +770,7 @@ func _maybe_disaster(dt: float, offline: bool) -> void:
 			choices.append(id)
 	if choices.is_empty():
 		return
-	var pick: String = choices[randi() % choices.size()]
+	var pick: String = choices[rng.randi() % choices.size()]
 	var d: Dictionary = Balance.DISASTERS[pick]
 
 	match pick:
@@ -888,8 +906,8 @@ func _add_notable(kind: String, what: String) -> void:
 	var names: Array = Balance.GIVEN_NAMES
 	var roles: Array = Balance.NOTABLE_ROLES.get(kind, ["who was there"])
 	var entry := {
-		"name": String(names[randi() % names.size()]),
-		"role": String(roles[randi() % roles.size()]),
+		"name": String(names[rng.randi() % names.size()]),
+		"role": String(roles[rng.randi() % roles.size()]),
 		"what": what,
 		"day": int(day),
 		"era": era,
@@ -1106,10 +1124,10 @@ func _maybe_council(dt: float, offline: bool) -> void:
 	_council_cooldown -= dt
 	if _council_cooldown > 0.0:
 		return
-	_council_cooldown = Balance.COUNCIL_INTERVAL_DAYS * randf_range(0.7, 1.4)
+	_council_cooldown = Balance.COUNCIL_INTERVAL_DAYS * rng.randf_range(0.7, 1.4)
 	if population < 20.0:
 		return
-	council_id = Balance.COUNCIL_ORDER[randi() % Balance.COUNCIL_ORDER.size()]
+	council_id = Balance.COUNCIL_ORDER[rng.randi() % Balance.COUNCIL_ORDER.size()]
 	council_deadline = day + Balance.COUNCIL_PATIENCE_DAYS
 	if not offline:
 		add_log("%s %s" % [Balance.COUNCIL[council_id]["title"],
@@ -1149,7 +1167,7 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 			resources["food"] = maxf(resources["food"], population * 6.0)
 			_note("Rations are set. Nobody starves and nobody grows.", offline)
 		"trust":
-			if randf() < 0.55:
+			if rng.randf() < 0.55:
 				_note("The winter is mild. Nothing was needed after all.", offline)
 			else:
 				resources["food"] *= 0.55
@@ -1203,7 +1221,7 @@ func _resolve_council(id: String, choice: String, by_elders: bool, offline: bool
 	_chronicle("%s - %s." % [Balance.COUNCIL[id]["title"], choice.replace("_", " ")], "council")
 	if by_elders:
 		add_log("(The elders decided this one themselves.)", "info")
-	elif randf() < 0.4:
+	elif rng.randf() < 0.4:
 		_add_notable("council", "It was their argument that carried the day.")
 	council_closed.emit(id, choice, by_elders)
 	state_changed.emit()
@@ -2331,7 +2349,7 @@ func _complete_tech(id: String) -> void:
 	var t: Dictionary = Balance.TECHS[id]
 	add_log("%s: %s" % [t["name"], t["desc"]], "tech")
 	_chronicle("%s." % t["name"], "tech")
-	if randf() < 0.22:
+	if rng.randf() < 0.22:
 		_add_notable("tech", "It was %s that finally settled it." % t["name"])
 	if ore_tier() != tier_before:
 		var tier: Dictionary = Balance.ORE_TIERS[ore_tier()]
@@ -2750,10 +2768,10 @@ func _maybe_event(dt: float) -> void:
 	_event_cooldown -= dt
 	if _event_cooldown > 0.0:
 		return
-	if randf() > Balance.EVENT_CHANCE_PER_DAY * dt:
+	if rng.randf() > Balance.EVENT_CHANCE_PER_DAY * dt:
 		return
 	_event_cooldown = Balance.EVENT_COOLDOWN_DAYS
-	var e: Dictionary = EVENTS[randi() % EVENTS.size()]
+	var e: Dictionary = EVENTS[rng.randi() % EVENTS.size()]
 	match e["id"]:
 		"drought":
 			resources["water"] *= 0.45
@@ -2838,6 +2856,9 @@ func to_dict() -> Dictionary:
 		"day": day,
 		"population": population,
 		"peak_population": peak_population,
+		# Saved so a reloaded game continues the same sequence of events
+		# rather than forking into a different one at every load.
+		"rng_state": str(rng.state),
 		"Profile.legacy_points": Profile.legacy_points,
 		"lifetime_output": lifetime_output,
 		"boon_id": boon_id,
@@ -2894,6 +2915,9 @@ func from_dict(d: Dictionary) -> void:
 	day = float(d.get("day", 0.0))
 	population = float(d.get("population", 6.0))
 	peak_population = maxf(population, float(d.get("peak_population", population)))
+	var rs := String(d.get("rng_state", ""))
+	if rs.is_valid_int():
+		rng.state = int(rs)
 	Profile.legacy_points = float(d.get("Profile.legacy_points", 0.0))
 	lifetime_output = float(d.get("lifetime_output", 0.0))
 	boon_id = String(d.get("boon_id", ""))

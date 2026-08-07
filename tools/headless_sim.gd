@@ -13,6 +13,29 @@ const DEFAULT_SEEDS := 3
 const REPORT_EVERY := 250
 
 var _failures: Array[String] = []
+## The harness's own sampling, kept off the global RNG for the same reason the
+## simulation is: a regression test that cannot reproduce its own numbers is
+## not measuring anything.
+var _rng := RandomNumberGenerator.new()
+
+
+func _snapshot_profile() -> Dictionary:
+	return {
+		"points": Profile.legacy_points, "perks": Profile.perks.duplicate(),
+		"achievements": Profile.achievements.duplicate(),
+		"shapes": Profile.shapes_played.duplicate(), "runs": Profile.runs_completed,
+		"best": Profile.best_population,
+	}
+
+
+func _restore_profile(d: Dictionary) -> void:
+	Profile.legacy_points = float(d["points"])
+	Profile.perks.assign(d["perks"])
+	Profile.achievements.assign(d["achievements"])
+	Profile.shapes_played.assign(d["shapes"])
+	Profile.runs_completed = int(d["runs"])
+	Profile.best_population = float(d["best"])
+	Profile.save_profile()
 
 
 func _ready() -> void:
@@ -25,6 +48,18 @@ func _ready() -> void:
 		elif args[i] == "--seeds" and i + 1 < args.size():
 			seeds = int(args[i + 1])
 
+	# Run against an empty profile, and put the real one back afterwards.
+	#
+	# Legacy lives in user://profile.cfg and is deliberately *not* reset between
+	# runs - which meant the harness banked points into it every time it ran, and
+	# legacy is a flat percentage on every trade. So each run started richer than
+	# the last and no two runs produced the same numbers. Every balance figure
+	# this tool printed was quietly a function of how many times it had been run
+	# before, which is the exact opposite of what a regression test is for. It
+	# also silently spent the developer's own profile.
+	var saved := _snapshot_profile()
+	Profile.wipe()
+
 	for s in range(1, seeds + 1):
 		# Cycle the world shapes so every generator path is covered.
 		_run_seed(s * 1337, days, (s - 1) % Balance.WORLD_TYPES.size())
@@ -33,6 +68,8 @@ func _ready() -> void:
 	_test_legacy()
 	_test_baseline()
 	_test_engagement()
+
+	_restore_profile(saved)
 
 	print("")
 	if _failures.is_empty():
@@ -113,6 +150,7 @@ func _test_save_load() -> void:
 	print("")
 	print("=== save / load round trip ===")
 	Sim.new_game(90210, Balance.WorldType.CONTINENTS)
+	Sim.speed_index = 0
 	Sim.simulate_days(400.0, true)
 	for id in ["firepit", "windbreak", "windbreak"]:
 		if Sim.can_build(id):
@@ -147,6 +185,7 @@ func _test_save_load() -> void:
 		return
 	# Wipe the state completely so a silent no-op load cannot pass this test.
 	Sim.new_game(11111, Balance.WorldType.ARCHIPELAGO)
+	Sim.speed_index = 0
 	if not SaveSystem.load_game():
 		_failures.append("save/load: load_game() reported failure")
 		return
@@ -196,6 +235,7 @@ func _test_legacy() -> void:
 	print("")
 	print("=== legacy ===")
 	Sim.new_game(4242, Balance.WorldType.CONTINENTS)
+	Sim.speed_index = 0
 	# Run until the civilisation has done enough to be worth remembering. How
 	# long that takes varies enormously between seeds - an exponential economy
 	# compounds small early differences - so this waits rather than assuming a
@@ -242,6 +282,7 @@ func _test_baseline() -> void:
 	print("")
 	print("=== baseline (seed 1337, Earth, day %d) ===" % int(BASELINE["day"]))
 	Sim.new_game(1337, Balance.WorldType.EARTH)
+	Sim.speed_index = 0
 	Sim.simulate_days(float(BASELINE["day"]), true)
 	print("pop %s, %d techs, %d upgrades, %.0f%% mapped, era %d"
 			% [Balance.fmt_count(Sim.population), Sim.techs.size(), Sim.upgrades.size(),
@@ -273,7 +314,9 @@ func _test_engagement() -> void:
 	print("")
 	print("=== managed vs left alone (seed 777, %d days) ===" % int(ENGAGEMENT_DAYS))
 
+	_rng.seed = 90210
 	Sim.new_game(777, Balance.WorldType.CONTINENTS)
+	Sim.speed_index = 0
 	Sim.simulate_days(ENGAGEMENT_DAYS, true)
 	var idle_pop := Sim.population
 	var idle_out := Sim.lifetime_output
@@ -281,7 +324,9 @@ func _test_engagement() -> void:
 	print("left alone: %s people, %s lifetime output, %s Legacy on offer"
 			% [Balance.fmt_count(idle_pop), Balance.fmt(idle_out), Balance.fmt(idle_legacy)])
 
+	_rng.seed = 90210
 	Sim.new_game(777, Balance.WorldType.CONTINENTS)
+	Sim.speed_index = 0
 	var elapsed := 0.0
 	while elapsed < ENGAGEMENT_DAYS:
 		Sim.simulate_days(8.0, true)
@@ -361,7 +406,7 @@ func _maybe_outpost() -> void:
 	var best_score := 0.0
 	# Sample rather than sweep - a player eyeballs the map, they do not solve it.
 	for probe in 220:
-		var i := randi() % Sim.world.explored.size()
+		var i := _rng.randi() % Sim.world.explored.size()
 		if not Sim.can_found_outpost(i):
 			continue
 		var v := Sim.outpost_value(i)
