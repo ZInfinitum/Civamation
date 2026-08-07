@@ -107,6 +107,11 @@ var season: int = 0
 ## rhythm under the season's slow one - a few days at a time, unannounced.
 var weather: int = 0
 var weather_until: float = 0.0
+## Which tutorial step is next, and which have been seen. The machine runs
+## whether or not anything is drawing it - see Balance.TUTORIAL_STEPS.
+var tutorial_step: int = 0
+var tutorial_seen: Array[String] = []
+
 ## Centimetres of lying snow. Outlives the snowfall that made it and melts back
 ## with the temperature, so a hard week costs movement well after the sky clears.
 var snow_depth: float = 0.0
@@ -273,6 +278,8 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	weather = 0
 	weather_until = 0.0
 	snow_depth = 0.0
+	tutorial_step = 0
+	tutorial_seen.clear()
 	chronicle.clear()
 	notables.clear()
 	beat = 0
@@ -489,6 +496,7 @@ func _step(dt: float, offline: bool = false) -> void:
 	_update_snow(dt)
 	_maybe_strike(dt)
 	_consume_and_grow(dt)
+	_migrate(dt)
 	_progress_builds(dt)
 	_progress_research(dt)
 	if auto_upgrade and housekeep:
@@ -1150,6 +1158,56 @@ func deposits_total() -> int:
 	return 0 if world == null else world.deposits.size()
 
 
+# --- Tutorial ---------------------------------------------------------------
+
+## The step the player should be shown next, or {} when there is nothing to
+## say. Runs whether or not anything is drawing it, so turning the tutorial on
+## is a matter of rendering this rather than of writing it.
+func tutorial_current() -> Dictionary:
+	while tutorial_step < Balance.TUTORIAL_STEPS.size():
+		var step: Dictionary = Balance.TUTORIAL_STEPS[tutorial_step]
+		if tutorial_seen.has(String(step["id"])):
+			tutorial_step += 1
+			continue
+		if not tutorial_ready(String(step["needs"])):
+			# Not applicable yet. Hold here rather than skipping ahead, so the
+			# steps stay in the order they teach best.
+			return {}
+		return step
+	return {}
+
+
+## Is this step's condition met? Each is a plain question about the simulation,
+## so a player who has already done the thing is never told to do it.
+func tutorial_ready(needs: String) -> bool:
+	match needs:
+		"always": return true
+		"no_firepit": return int(buildings.get("firepit", 0)) == 0
+		"no_explorer": return int(jobs.get("explorer", 0)) == 0 and world.frontier_open()
+		"can_decree": return can_set_decree() and population >= 20.0
+		"winter_soon": return season == 2 and population >= 30.0
+	return false
+
+
+## Mark the current step done and move on.
+func tutorial_advance() -> void:
+	var step := tutorial_current()
+	if step.is_empty():
+		return
+	tutorial_seen.append(String(step["id"]))
+	tutorial_step += 1
+	state_changed.emit()
+
+
+## Skip the whole thing.
+func tutorial_dismiss() -> void:
+	for step in Balance.TUTORIAL_STEPS:
+		if not tutorial_seen.has(String(step["id"])):
+			tutorial_seen.append(String(step["id"]))
+	tutorial_step = Balance.TUTORIAL_STEPS.size()
+	state_changed.emit()
+
+
 # --- Weather ----------------------------------------------------------------
 
 ## Roll a new spell of weather when the last one runs out. Weighted by season,
@@ -1301,7 +1359,10 @@ func found_settlement(tile: int) -> bool:
 	for res in cost:
 		resources[res] -= float(cost[res])
 	settlement_points -= 1
-	settlements.append({"tile": tile, "value": outpost_value(tile)})
+	# The founding party. Taken from the capital rather than conjured, so
+	# founding a town genuinely moves people rather than adding them.
+	var founders := minf(maxf(20.0, population * 0.04), capital_pop() * 0.3)
+	settlements.append({"tile": tile, "value": outpost_value(tile), "pop": founders})
 	_mods_dirty = true
 	var far := int(Vector2(world.tile_pos(tile) - world.origin).length())
 	add_log("A new settlement is founded %d tiles out. People live there now, "
@@ -1379,8 +1440,109 @@ func settlement_production(res: String) -> float:
 	for i in settlements.size():
 		var v: Dictionary = settlements[i].get("value", {})
 		var share := reach if connected.has(i) else Balance.ROAD_ISOLATED_REACH
-		total += float(v.get(res, 0.0)) * Balance.SETTLEMENT_YIELD_SCALE * share
+		# And how well it is staffed. A town with nobody in it works none of its
+		# ground, which is what makes migration matter rather than being scenery.
+		total += float(v.get(res, 0.0)) * Balance.SETTLEMENT_YIELD_SCALE * share \
+				* settlement_staffing(i)
 	return total
+
+
+## How much of its own ground a town can actually work, 0 to 1, from how many
+## people live there against how many that ground needs.
+func settlement_staffing(i: int) -> float:
+	if i < 0 or i >= settlements.size():
+		return 0.0
+	var need := settlement_staff_need(i)
+	if need <= 0.0:
+		return 1.0
+	return clampf(float(settlements[i].get("pop", 0.0)) / need, 0.0, 1.0)
+
+
+func settlement_staff_need(i: int) -> float:
+	var v: Dictionary = settlements[i].get("value", {})
+	var worth := 0.0
+	for res in ["food", "wood", "ore", "stone"]:
+		worth += float(v.get(res, 0.0))
+	return worth * Balance.SETTLEMENT_STAFF_PER_VALUE
+
+
+func settlement_pop(i: int) -> float:
+	if i < 0 or i >= settlements.size():
+		return 0.0
+	return float(settlements[i].get("pop", 0.0))
+
+
+## Everyone who is not living in one of the towns.
+func capital_pop() -> float:
+	var away := 0.0
+	for s in settlements:
+		away += float(s.get("pop", 0.0))
+	return maxf(0.0, population - away)
+
+
+## People move toward room and food, and they move faster along a good road.
+##
+## Attractiveness is spare housing: the capital's is its housing against the
+## people in it, a town's is its own. Everybody drifts from the crowded places
+## toward the roomy ones, which means founding a town actually relieves the
+## capital rather than merely adding a number somewhere else on the map.
+func _migrate(dt: float) -> void:
+	if settlements.is_empty():
+		return
+	var reach := float(road_info()["reach"])
+	var connected := _connected_settlements()
+
+	# Room per place, as a fraction. Negative means over-full.
+	var cap_here := maxf(_housing_total() - float(settlements.size())
+			* Balance.SETTLEMENT_HOUSING, 1.0)
+	var here := capital_pop()
+	var room_here := (cap_here - here) / cap_here
+
+	for i in settlements.size():
+		var s: Dictionary = settlements[i]
+		var pop_there := float(s.get("pop", 0.0))
+		var cap_there := Balance.SETTLEMENT_HOUSING
+		var room_there := (cap_there - pop_there) / cap_there
+
+		var pull := room_there - room_here
+		if absf(pull) < Balance.MIGRATION_DEADBAND:
+			continue
+		# An isolated town is hard to get to, so people trickle rather than flow.
+		var ease := reach if connected.has(i) else Balance.ROAD_ISOLATED_REACH
+		var movers := pull * Balance.MIGRATION_RATE * ease * dt \
+				* minf(here, maxf(pop_there, 1.0) * 4.0 + 20.0)
+		# Never move more people than are actually in the place they leave.
+		if movers > 0.0:
+			movers = minf(movers, here * 0.5)
+		else:
+			movers = -minf(-movers, pop_there * 0.5)
+		s["pop"] = maxf(0.0, pop_there + movers)
+		settlements[i] = s
+		here = maxf(0.0, here - movers)
+
+	# Population as a whole is unchanged - this only decides who is where - but
+	# births and deaths happen nationally, so the towns are rescaled to keep
+	# their share of a population that moved underneath them.
+	_reconcile_settlement_pops()
+
+
+## Keep the sum of the towns inside the national total. Births, deaths and the
+## never-lose floor all act on the whole population without knowing about towns,
+## so without this the towns slowly claim more people than exist.
+func _reconcile_settlement_pops() -> void:
+	var away := 0.0
+	for s in settlements:
+		away += float(s.get("pop", 0.0))
+	# Leave at least a third of everybody in the capital; a civilisation whose
+	# every citizen emigrated is not a thing the rest of the model expects.
+	var allowed := population * 0.67
+	if away <= allowed or away <= 0.0:
+		return
+	var scale := allowed / away
+	for i in settlements.size():
+		var s: Dictionary = settlements[i]
+		s["pop"] = float(s.get("pop", 0.0)) * scale
+		settlements[i] = s
 
 
 func outpost_cost() -> Dictionary:
@@ -3446,6 +3608,8 @@ func to_dict() -> Dictionary:
 		"weather": weather,
 		"weather_until": weather_until,
 		"snow_depth": snow_depth,
+		"tutorial_step": tutorial_step,
+		"tutorial_seen": tutorial_seen.duplicate(),
 		"beat": beat,
 		"trade_sell": trade_sell,
 		"trade_buy": trade_buy,
@@ -3519,6 +3683,10 @@ func from_dict(d: Dictionary) -> void:
 	weather = clampi(int(d.get("weather", 0)), 0, Balance.WEATHER.size() - 1)
 	weather_until = float(d.get("weather_until", 0.0))
 	snow_depth = float(d.get("snow_depth", 0.0))
+	tutorial_step = int(d.get("tutorial_step", 0))
+	tutorial_seen.clear()
+	for t in d.get("tutorial_seen", []):
+		tutorial_seen.append(String(t))
 	beat = int(d.get("beat", 0))
 	trade_sell = String(d.get("trade_sell", ""))
 	trade_buy = String(d.get("trade_buy", ""))
@@ -3538,7 +3706,9 @@ func from_dict(d: Dictionary) -> void:
 	settlements.clear()
 	for sv in d.get("settlements", []):
 		if sv is Dictionary:
-			settlements.append({"tile": int(sv.get("tile", 0)), "value": sv.get("value", {})})
+			settlements.append({"tile": int(sv.get("tile", 0)),
+					"value": sv.get("value", {}),
+					"pop": float(sv.get("pop", 0.0))})
 	outposts.clear()
 	for o in d.get("outposts", []):
 		if o is Dictionary:

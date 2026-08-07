@@ -919,7 +919,8 @@ func _draw_outposts(world: CivWorld) -> void:
 
 	# Settlements: bigger, cooler in colour, and with their own claimed ring, so
 	# a glance at the map tells you which of the two you are looking at.
-	for sv in Sim.settlements:
+	for i in Sim.settlements.size():
+		var sv: Dictionary = Sim.settlements[i]
 		var t := world.tile_pos(int(sv["tile"]))
 		var p := _tile_to_screen(Vector2(t))
 		if p.x < -40.0 or p.y < -40.0 or p.x > size.x + 40.0 or p.y > size.y + 40.0:
@@ -938,6 +939,16 @@ func _draw_outposts(world: CivWorld) -> void:
 				c + Vector2(-s * 0.17, -s * 0.06), c + Vector2(s * 0.17, -s * 0.06),
 				c + Vector2(0.0, -s * 0.36),
 			]), Color("d6e3ee"))
+
+		# How many people live here. A town holds its own population now, so the
+		# map should say how many rather than only that a town is there.
+		if zoom >= DETAIL_ZOOM:
+			var font := get_theme_default_font()
+			if font != null:
+				var label := Balance.fmt_count(Sim.settlement_pop(i))
+				var wide := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+				_overlay.draw_string(font, p + Vector2(-wide * 0.5, s * 0.62), label,
+						HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("d6e3ee"))
 
 
 ## While placing, shade every tile that would actually take an outpost. The

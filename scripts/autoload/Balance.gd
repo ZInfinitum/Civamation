@@ -1496,6 +1496,89 @@ const ROAD_TIERS := [
 ## rest is eaten by the journey. Connecting one is a real gain, not a rounding.
 const ROAD_ISOLATED_REACH := 0.55
 
+## --- Tutorial ---------------------------------------------------------------
+## The steps, their trigger conditions and what each points at.
+##
+## Wired but not shown. `Settings.tutorial_enabled` is false, so nothing renders
+## and the player sees exactly what they saw before - but the state machine
+## runs, advances, and is saved, which means the whole thing can be turned on
+## and tested by flipping one flag rather than by writing it later against a
+## game that has moved on underneath it.
+##
+## `needs` is read by Sim.tutorial_ready(); each is a plain question about the
+## simulation rather than a scripted trigger, so a player who has already done
+## the thing skips the step instead of being told to do what they did.
+const TUTORIAL_STEPS := [
+	{
+		"id": "look", "needs": "always", "panel": "map",
+		"title": "This is your country",
+		"text": "Six people, a river, and as much ground as anyone has walked. "
+				+ "Everything else is dark until somebody goes and looks.",
+	},
+	{
+		"id": "stores", "needs": "always", "panel": "stores",
+		"title": "What you have",
+		"text": "Food and water are what people need. Everything else is what "
+				+ "they build with. Nothing here has a maximum.",
+	},
+	{
+		"id": "work", "needs": "always", "panel": "work",
+		"title": "Who does what",
+		"text": "The elders assign the work themselves and do it competently. "
+				+ "Turn that off whenever you want the decisions.",
+	},
+	{
+		"id": "fire", "needs": "no_firepit", "panel": "build",
+		"title": "Build a fire",
+		"text": "The cheapest thing you will ever build, and it improves "
+				+ "everything after it - including how much can be done after dark.",
+	},
+	{
+		"id": "explore", "needs": "no_explorer", "panel": "work",
+		"title": "Send somebody out",
+		"text": "The settlement cannot claim ground nobody has walked. "
+				+ "Explorers are the bottleneck far more often than they look.",
+	},
+	{
+		"id": "speed", "needs": "always", "panel": "speed",
+		"title": "Time",
+		"text": "Thirty seconds to the day. Faster speeds unlock as the "
+				+ "civilisation gets old enough to have earned them.",
+	},
+	{
+		"id": "decree", "needs": "can_decree", "panel": "rule",
+		"title": "Your half of the game",
+		"text": "A decree is a real bonus paid for with a real cost. The elders "
+				+ "will never issue one - that is what you are for.",
+	},
+	{
+		"id": "seasons", "needs": "winter_soon", "panel": "top",
+		"title": "The year turns",
+		"text": "Winter is coming and the fields will give almost nothing. "
+				+ "What is in the store is what there is.",
+	},
+]
+
+## --- Where people live ------------------------------------------------------
+## A settlement holds its own people now, rather than being a production
+## building with a map position. The capital holds whoever is not in one.
+##
+## Population is still a single national total with a single age structure -
+## per-town age bands would be a great deal of state for very little the player
+## could see. What is per-town is *how many*, which is what decides whether a
+## town can work its ground and whether anyone wants to move there.
+##
+## Migration is the interesting half. People go where there is room and food,
+## and they go faster along a good road - so a well-connected town fills up and
+## an isolated one stays a hamlet however good its land.
+const MIGRATION_RATE := 0.055
+## Nobody moves for a difference smaller than this; it stops the whole country
+## sloshing back and forth over rounding.
+const MIGRATION_DEADBAND := 0.06
+## A town needs about this many people per unit of its ground's value to work it
+## properly. Under-staffed towns produce proportionally less.
+const SETTLEMENT_STAFF_PER_VALUE := 2.2
+
 ## --- Wildlife density -------------------------------------------------------
 ## One animal marker used to mean "there is wildlife here", which told the player
 ## nothing about how much. A herd is a quantity, and the map is the only place
