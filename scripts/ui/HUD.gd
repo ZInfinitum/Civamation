@@ -30,6 +30,7 @@ var _day_label: Label
 var _pop_label: Label
 var _fps_label: Label
 var _season_label: Label
+var _weather_label: Label
 var _speed_buttons: Array[Button] = []
 
 # Panels
@@ -60,12 +61,15 @@ var _sparks := {}
 var _decree_list: VBoxContainer
 var _festival_button: Button
 var _outpost_button: Button
+var _settlement_button: Button
+var _settlement_note: Label
 var _rule_note: Label
 var _trade_note: Label
 var _trade_sell: OptionButton
 var _trade_buy: OptionButton
 var _council_dialog: AcceptDialog
 var _placing_outpost := false
+var _placing_settlement := false
 var _filter_pick: OptionButton
 var _filter_note: Label
 
@@ -270,6 +274,8 @@ func _build_top_bar() -> Control:
 
 	_season_label = _text("", 13, TEXT)
 	row.add_child(_season_label)
+	_weather_label = _text("", 13, MUTED)
+	row.add_child(_weather_label)
 
 	_speed_buttons.clear()
 	for i in Balance.SPEEDS.size():
@@ -568,6 +574,19 @@ func _build_right_column() -> Control:
 	rule.add_child(_wrapped(("Founded by hand on ground your explorers have walked, at least "
 			+ "%d tiles out. It sends back whatever that country gives - so where you put "
 			+ "it is the whole decision.") % int(Balance.OUTPOST_MIN_DISTANCE)))
+	_settlement_button = Button.new()
+	_settlement_button.pressed.connect(func() -> void:
+		# The two placement modes are mutually exclusive - arming one disarms the
+		# other, so a click on the map is never ambiguous.
+		_placing_settlement = not _placing_settlement
+		_placing_outpost = false
+		_map.placing_outpost = false
+		_map.placing_settlement = _placing_settlement
+		_dirty = true)
+	rule.add_child(_settlement_button)
+	_settlement_note = _wrapped("")
+	rule.add_child(_settlement_note)
+
 	rule.add_child(_heading("TRADE"))
 	_trade_note = _wrapped("", 12, MUTED)
 	rule.add_child(_trade_note)
@@ -1005,6 +1024,29 @@ func _refresh_summary() -> void:
 			else "Found an outpost  -  %s" % _cost_text(oc).replace("Costs ", ""))
 	_outpost_button.disabled = Sim.outposts.size() >= Balance.OUTPOST_MAX
 
+	if Sim.settlement_points > 0:
+		_settlement_button.text = ("Click the map to place  (cancel)" if _placing_settlement
+				else "Found a settlement  -  %s" % _cost_text(Sim.settlement_cost()).replace("Costs ", ""))
+		_settlement_button.disabled = false
+		_settlement_note.text = ("%d settlement point%s in hand. A settlement is a second place "
+				% [Sim.settlement_points, "" if Sim.settlement_points == 1 else "s"]
+				+ "people live: it houses %d of them, claims the land around it and works that "
+				% int(Balance.SETTLEMENT_HOUSING)
+				+ "ground properly. At least %d tiles out." % int(Balance.SETTLEMENT_MIN_DISTANCE))
+	else:
+		_settlement_button.text = "Found a settlement  -  no points"
+		_settlement_button.disabled = true
+		var next_at := 0.0
+		for t in Balance.SETTLEMENT_POP_THRESHOLDS:
+			if Sim.population < float(t):
+				next_at = float(t)
+				break
+		_settlement_note.text = ("Settlement points are earned by growing. The next comes at "
+				+ "%s people." % Balance.fmt_count(next_at)) if next_at > 0.0 \
+				else "You have founded everywhere there is to found."
+	if Sim.settlements.size() > 0:
+		_settlement_note.text += "  %d founded." % Sim.settlements.size()
+
 	if Sim.can_trade():
 		_trade_note.text = ("Currently sending %s and receiving %s." % [
 				String(Balance.RESOURCES[Sim.trade_sell]["name"]).to_lower(),
@@ -1051,6 +1093,10 @@ func _refresh_top() -> void:
 	_season_label.text = String(season["name"])
 	_season_label.add_theme_color_override("font_color", season["color"])
 	_season_label.tooltip_text = String(season["note"])
+	var wx := Sim.weather_info()
+	_weather_label.text = String(wx["name"])
+	_weather_label.add_theme_color_override("font_color", wx["color"])
+	_weather_label.tooltip_text = String(wx["note"])
 
 
 func _refresh_resources() -> void:
@@ -1311,8 +1357,10 @@ func _set_speed(index: int) -> void:
 
 func _on_game_reset() -> void:
 	_placing_outpost = false
+	_placing_settlement = false
 	if _map != null:
 		_map.placing_outpost = false
+		_map.placing_settlement = false
 	_queue_signature = "!"
 	_rebuild_lists()
 	_replay_log()
@@ -1717,6 +1765,26 @@ func _open_settings() -> void:
 	v.add_child(_wrapped("Space or the View button pauses. [ and ] or the shoulder buttons "
 			+ "change speed. The map scrolls to zoom and drags to pan. Every control is "
 			+ "reachable with a gamepad."))
+
+	# Cheats. Openly labelled rather than hidden behind a key sequence: this is a
+	# game about watching a number go up, and the fastest way to find out whether
+	# a system is any fun is to give yourself the thing and try it.
+	v.add_child(_heading("CHEATS"))
+	var cheat_row := HBoxContainer.new()
+	cheat_row.add_theme_constant_override("separation", 8)
+	var grant := Button.new()
+	grant.text = "Grant a settlement point"
+	var granted := _text("", 12, GOOD)
+	grant.pressed.connect(func() -> void:
+		Sim.grant_settlement_point()
+		granted.text = "%d in hand" % Sim.settlement_points
+		_dirty = true)
+	cheat_row.add_child(grant)
+	cheat_row.add_child(granted)
+	v.add_child(cheat_row)
+	v.add_child(_wrapped("Settlement points are normally earned by growing - the first at "
+			+ "%s people. This hands you one now so the system can be tried out."
+			% Balance.fmt_count(float(Balance.SETTLEMENT_POP_THRESHOLDS[0]))))
 
 	v.add_child(_heading("ARTWORK"))
 	var reset_row := HBoxContainer.new()

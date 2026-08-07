@@ -68,6 +68,7 @@ func _ready() -> void:
 	_test_legacy()
 	_test_baseline()
 	_test_engagement()
+	_test_settlements()
 
 	_restore_profile(saved)
 
@@ -443,6 +444,89 @@ const JOB_ABBREV := {
 	"farmer": "farm", "forester": "wood+", "quarrier": "quarry",
 	"miner": "mine", "thinker": "think",
 }
+
+
+## Settlements are earned, placed by hand, and then have to actually do
+## something - otherwise the whole layer is a button that spends a number.
+func _test_settlements() -> void:
+	print("")
+	print("=== settlements ===")
+	Sim.new_game(31415, Balance.WorldType.CONTINENTS)
+	Sim.speed_index = 0
+	Sim.simulate_days(600.0, true)
+
+	if Sim.settlement_points <= 0:
+		_failures.append("settlements: %.0f people and not one point earned"
+				% Sim.population)
+		return
+
+	# The cheat has to work too - it is the only way to try this early.
+	var before_points := Sim.settlement_points
+	Sim.grant_settlement_point()
+	if Sim.settlement_points != before_points + 1:
+		_failures.append("settlements: the cheat did not grant a point")
+
+	var site := -1
+	for i in Sim.world.explored.size():
+		if Sim.can_found_settlement(i):
+			site = i
+			break
+	if site < 0:
+		# Say *why*, or this failure is a guessing game.
+		var walked := 0
+		var far_enough := 0
+		var buildable := 0
+		for i in Sim.world.explored.size():
+			if Sim.world.explored[i] == 0:
+				continue
+			walked += 1
+			if Vector2(Sim.world.tile_pos(i) - Sim.world.origin).length() \
+					< Balance.SETTLEMENT_MIN_DISTANCE:
+				continue
+			far_enough += 1
+			if Sim.world.workable(i) and not Balance.is_water_biome(Sim.world.biome[i]):
+				buildable += 1
+		var cost := Sim.settlement_cost()
+		var afford := "yes"
+		for res in cost:
+			if Sim.resources.get(res, 0.0) < float(cost[res]):
+				afford = "no - %s %s of %s" % [res,
+						Balance.fmt(Sim.resources.get(res, 0.0)), Balance.fmt(float(cost[res]))]
+		_failures.append(("settlements: %d points and nowhere legal. "
+				% Sim.settlement_points)
+				+ "%d walked, %d far enough out, %d of those buildable, affordable: %s"
+				% [walked, far_enough, buildable, afford])
+		return
+
+	var radius_before := Sim.world.territory_radius
+	var housing_before := Sim.housing
+	var points_before := Sim.settlement_points
+	if not Sim.found_settlement(site):
+		_failures.append("settlements: founding refused on a tile that said it was legal")
+		return
+	Sim.simulate_days(20.0, true)
+
+	print("earned %d points by day 600; founded one %d tiles out"
+			% [before_points, int(Vector2(Sim.world.tile_pos(site) - Sim.world.origin).length())])
+	print("territory %.1f -> %.1f, housing %s -> %s"
+			% [radius_before, Sim.world.territory_radius,
+			Balance.fmt_count(housing_before), Balance.fmt_count(Sim.housing)])
+
+	if Sim.settlement_points != points_before - 1:
+		_failures.append("settlements: founding did not spend a point")
+	if Sim.settlements.size() != 1:
+		_failures.append("settlements: founded one and there are %d" % Sim.settlements.size())
+	if Sim.housing <= housing_before:
+		_failures.append("settlements: housing did not rise - a settlement is somewhere people live")
+	if Sim.world.territory_radius <= radius_before:
+		_failures.append("settlements: territory did not grow around the new settlement")
+	# And it must survive a save.
+	SaveSystem.save_game()
+	Sim.new_game(11111, Balance.WorldType.ISLANDS)
+	Sim.speed_index = 0
+	SaveSystem.load_game()
+	if Sim.settlements.size() != 1:
+		_failures.append("settlements: did not survive a save round trip")
 
 
 func _job_summary() -> String:

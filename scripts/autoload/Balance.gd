@@ -1088,6 +1088,100 @@ const PEOPLE_PER_FIGURE_STEPS: Array[float] = [1.0, 5.0, 25.0, 100.0, 500.0, 250
 ## Colour every figure the same in the Population filter.
 const CROWD_COLOR := Color("e8dcc0")
 
+## --- Weather ----------------------------------------------------------------
+## Seasons are the slow rhythm; weather is the fast one. A season lasts a
+## quarter of a year and is known in advance, so it is something to plan around.
+## Weather turns over every few days and is not, so it is something to notice -
+## the reason to glance at a game that is otherwise running itself.
+##
+## Effects are deliberately small. Weather is texture, not difficulty: the point
+## is that the map is never the same twice, not that a wet fortnight ruins a
+## civilisation. The season multipliers do the heavy lifting.
+##
+## `weight` is per season (spring, summer, autumn, winter), so a given climate
+## produces the right weather at the right time of year without any extra state.
+const WEATHER := [
+	{
+		"id": "clear", "name": "Clear", "color": Color("cfe3f2"), "clouds": 0.10,
+		"note": "Nothing in the sky worth mentioning.",
+		"mult": {"build": 1.10, "explore": 1.10},
+		"weight": [1.0, 1.5, 1.1, 0.8],
+	},
+	{
+		"id": "fair", "name": "Fair", "color": Color("bcd6ea"), "clouds": 0.35,
+		"note": "High cloud, and a good day for anything.",
+		"mult": {"farm": 1.05},
+		"weight": [1.3, 1.2, 1.2, 0.9],
+	},
+	{
+		"id": "overcast", "name": "Overcast", "color": Color("9aa9b8"), "clouds": 0.75,
+		"note": "Grey from edge to edge. It will come to something.",
+		"mult": {"explore": 0.95},
+		"weight": [1.0, 0.7, 1.2, 1.3],
+	},
+	{
+		"id": "rain", "name": "Rain", "color": Color("7f9ab0"), "clouds": 0.95,
+		"note": "Steady rain. The fields drink and nobody else enjoys it.",
+		"mult": {"farm": 1.20, "forage": 1.10, "build": 0.90, "explore": 0.85},
+		"weight": [1.4, 0.8, 1.1, 0.7],
+	},
+	{
+		"id": "storm", "name": "Storm", "color": Color("5f7183"), "clouds": 1.0,
+		"note": "Wind and water together. Everyone who can be indoors is.",
+		"mult": {"build": 0.70, "explore": 0.60, "game": 0.85, "farm": 1.10},
+		"weight": [0.5, 0.4, 0.7, 0.6],
+	},
+	{
+		"id": "snow", "name": "Snow", "color": Color("dfe9f2"), "clouds": 0.85,
+		"note": "Snow, and the country goes quiet.",
+		"mult": {"farm": 0.80, "forage": 0.75, "explore": 0.70, "build": 0.85},
+		"weight": [0.15, 0.0, 0.10, 1.6],
+	},
+]
+
+## How long one spell of weather lasts, in days, before another is rolled.
+const WEATHER_MIN_DAYS := 2.0
+const WEATHER_MAX_DAYS := 7.0
+
+## --- Settlements ------------------------------------------------------------
+## An outpost is a place that sends things home. A settlement is a second place
+## people actually live: it carries its own housing, claims a wide ring of land
+## around itself, and works the ground there.
+##
+## They are not bought with resources but with **settlement points**, earned by
+## growing. That is deliberate - it makes founding one a milestone rather than a
+## purchase, and it stops a rich civilisation from simply blanketing the map.
+const SETTLEMENT_POP_THRESHOLDS: Array[float] = [
+	400.0, 1500.0, 6000.0, 25000.0, 100000.0, 400000.0, 1500000.0,
+]
+## Founding one costs a *share of the stores*, not a fixed sum.
+##
+## A flat price cannot work here. The auto-builder spends materials as fast as
+## they arrive, so the stores hover near whatever the next building costs rather
+## than accumulating - which means any absolute number is either trivial in the
+## late game or, as the first two attempts both were, permanently just out of
+## reach. Six hundred stone: never payable. Eight hundred timber: the test sat
+## at seven hundred and sixty-one, for ever.
+##
+## A fraction is always payable, always hurts the same amount, and needs no
+## retuning at any scale - the same reasoning behind the festival costing a
+## third of the granary rather than a number of loaves. The floors below are an
+## eligibility check, not a price: you must have a real store before you can
+## spend a share of it.
+const SETTLEMENT_COST_FRACTION := {"wood": 0.55, "food": 0.40}
+const SETTLEMENT_BASE_COST := {"wood": 250.0, "food": 400.0}
+## No settlement may cost more than this share, however many you have founded.
+const SETTLEMENT_MAX_FRACTION := 0.85
+const SETTLEMENT_COST_GROWTH := 1.40
+## Far enough out that a settlement is a genuinely separate place.
+const SETTLEMENT_MIN_DISTANCE := 12.0
+## And far enough from each other.
+const SETTLEMENT_SPACING := 9.0
+const SETTLEMENT_TERRITORY := 3.5
+const SETTLEMENT_HOUSING := 140.0
+## How much of the surrounding ground a settlement works, against an outpost's.
+const SETTLEMENT_YIELD_SCALE := 2.6
+
 ## --- Wildlife density -------------------------------------------------------
 ## One animal marker used to mean "there is wildlife here", which told the player
 ## nothing about how much. A herd is a quantity, and the map is the only place

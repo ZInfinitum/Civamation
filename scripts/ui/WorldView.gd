@@ -61,6 +61,10 @@ const MAX_ANIMAL_MARKS := 400
 ## next to the terrain pass, and a populated map is the whole point of drawing
 ## people at all - so this budget is set by what looks right, not by fear.
 const MAX_WORKER_MARKS := 420
+## Clouds at full overcast. Three circles each, so this is the whole sky budget.
+const CLOUD_MAX := 26
+## Tiles a cloud crosses per in-game day.
+const CLOUD_DRIFT_PER_DAY := 1.4
 
 var zoom: float = 13.0
 var camera := Vector2.ZERO  ## in tile coordinates
@@ -72,9 +76,12 @@ var _terrain_dirty := true
 var _dirty := true
 var _rebuild_accum := 0.0
 var _place_accum := 0.0
+var _cloud_accum := 0.0
 var _dragging := false
 ## Set by the Rule tab: the next map click founds an outpost.
 var placing_outpost := false
+## Same, for a settlement - a second place people actually live.
+var placing_settlement := false
 ## Which question the map is answering. See Balance.MAP_FILTERS.
 var filter: int = Balance.MapFilter.TRADES
 
@@ -181,6 +188,15 @@ func _process(delta: float) -> void:
 			_worker_spots.clear()
 		_dirty = true
 
+	# Clouds move with the in-game day, so they need a redraw cadence of their
+	# own - the ordinary dirty flag fires on material changes and once a second,
+	# which would make them judder across the sky.
+	if not Settings.reduce_motion and float(Sim.weather_info()["clouds"]) > 0.01:
+		_cloud_accum += delta
+		if _cloud_accum >= 0.066:
+			_cloud_accum = 0.0
+			_dirty = true
+
 	if _terrain_dirty or _dirty:
 		_dirty = false
 		_sync_terrain_shader()
@@ -205,10 +221,14 @@ func _gui_input(event: InputEvent) -> void:
 				Sim.collect_boon()
 				accept_event()
 				return
-			if mb.pressed and placing_outpost:
-				var t := _screen_to_tile(mb.position).floor()
+			if mb.pressed and (placing_outpost or placing_settlement):
+				var t := _screen_to_tile(mb.position)
 				if Sim.world.in_bounds(int(t.x), int(t.y)):
-					if Sim.found_outpost(Sim.world.idx(int(t.x), int(t.y))):
+					var i := Sim.world.idx(int(t.x), int(t.y))
+					if placing_settlement:
+						if Sim.found_settlement(i):
+							placing_settlement = false
+					elif Sim.found_outpost(i):
 						placing_outpost = false
 				accept_event()
 				return
@@ -483,9 +503,10 @@ func draw_overlay() -> void:
 	if zoom >= DETAIL_ZOOM:
 		_draw_workers(world)
 	_draw_outposts(world)
-	if placing_outpost:
+	if placing_outpost or placing_settlement:
 		_draw_placement(world)
 	_draw_boon(world)
+	_draw_clouds()
 	_draw_legend()
 
 
@@ -884,23 +905,52 @@ func _draw_outposts(world: CivWorld) -> void:
 		]), Color("8a7448"))
 		_overlay.draw_arc(p, s * 0.8, 0.0, TAU, 20, Color(0.8, 0.7, 0.4, 0.35), 1.5, true)
 
+	# Settlements: bigger, cooler in colour, and with their own claimed ring, so
+	# a glance at the map tells you which of the two you are looking at.
+	for sv in Sim.settlements:
+		var t := world.tile_pos(int(sv["tile"]))
+		var p := _tile_to_screen(Vector2(t))
+		if p.x < -40.0 or p.y < -40.0 or p.x > size.x + 40.0 or p.y > size.y + 40.0:
+			continue
+		var s := maxf(zoom, 8.0) * 1.35
+		_draw_territory_ring(p, Balance.SETTLEMENT_TERRITORY)
+		var tex := Art.ui("settlement")
+		if tex != null:
+			Art.draw_centred(_overlay, tex, p, s)
+			continue
+		# Three roofs on a base, which reads as a town rather than as a hut.
+		_overlay.draw_rect(Rect2(p - Vector2(s * 0.42, s * 0.06), Vector2(s * 0.84, s * 0.30)),
+				Color("9fb4c9"), true)
+		for dx in [-0.28, 0.0, 0.28]:
+			var c := p + Vector2(s * dx, 0.0)
+			_overlay.draw_colored_polygon(PackedVector2Array([
+				c + Vector2(-s * 0.17, -s * 0.06), c + Vector2(s * 0.17, -s * 0.06),
+				c + Vector2(0.0, -s * 0.36),
+			]), Color("d6e3ee"))
+
 
 ## While placing, shade every tile that would actually take an outpost. The
 ## decision is about *where*, so the map has to say where is allowed.
 func _draw_placement(world: CivWorld) -> void:
-	var lo := _screen_to_tile(Vector2.ZERO).floor()
-	var hi := _screen_to_tile(size).ceil()
+	var c0 := _screen_to_tile(Vector2.ZERO)
+	var c3 := _screen_to_tile(size)
+	var tint := Color(0.55, 0.85, 0.95, 0.26) if placing_settlement \
+			else Color(0.85, 0.75, 0.4, 0.22)
 	var shown := 0
-	for y in range(maxi(0, int(lo.y)), mini(world.h, int(hi.y) + 1)):
-		for x in range(maxi(0, int(lo.x)), mini(world.w, int(hi.x) + 1)):
+	for y in range(maxi(0, int(minf(c0.y, c3.y)) - 1), mini(world.h, int(maxf(c0.y, c3.y)) + 2)):
+		for x in range(maxi(0, int(minf(c0.x, c3.x)) - 2), mini(world.w, int(maxf(c0.x, c3.x)) + 2)):
 			if shown > 900:
 				return
 			var i := world.idx(x, y)
-			if world.explored[i] == 0 or not Sim.can_found_outpost(i):
+			if world.explored[i] == 0:
+				continue
+			if placing_settlement:
+				if not Sim.can_found_settlement(i):
+					continue
+			elif not Sim.can_found_outpost(i):
 				continue
 			shown += 1
-			_overlay.draw_rect(_hex_rect(x, y),
-					Color(0.85, 0.75, 0.4, 0.22), true)
+			_overlay.draw_rect(_hex_rect(x, y), tint, true)
 
 
 # --- Terrain sprites --------------------------------------------------------
@@ -948,6 +998,56 @@ func _draw_boon(world: CivWorld) -> void:
 	# The inner arc empties as the moment passes.
 	_overlay.draw_arc(centre, r * 0.62, -PI * 0.5, -PI * 0.5 + TAU * left, 28, col, 3.0, true)
 	_overlay.draw_circle(centre, r * 0.22, col)
+
+
+# --- Weather ----------------------------------------------------------------
+
+## Cloud shadows crossing the map.
+##
+## Cheap on purpose: a fixed set of blobs whose positions are a pure function of
+## the in-game day, so they cost no state, never desynchronise from the
+## simulation, and are identical on a reload. They drift in *world* space rather
+## than screen space, which is what stops them sliding around when you pan.
+##
+## How many appear is the current weather. Clear skies get one or two passing
+## over; a storm covers the map. That means the sky is readable from the map
+## itself without looking at a label, which is the point of having weather at
+## all in a game you are half-watching.
+func _draw_clouds() -> void:
+	if Settings.reduce_motion:
+		return
+	var info := Sim.weather_info()
+	var cover := float(info["clouds"])
+	if cover <= 0.01:
+		return
+	var count := int(round(cover * float(CLOUD_MAX)))
+	if count <= 0:
+		return
+
+	var col: Color = info["color"]
+	# Heavier weather means darker, more opaque shadow.
+	var alpha := 0.05 + cover * 0.16
+	# Drift: slow, and westward, at a speed that reads at any zoom.
+	var drift := Sim.day * CLOUD_DRIFT_PER_DAY
+
+	for k in count:
+		var seed_pt := _scatter[(k * 37) % _scatter.size()]
+		# Wrap across a band wider than the world so clouds enter and leave.
+		var span := float(Sim.world.w) + 24.0
+		var wx := fposmod(seed_pt.x * span + drift * (0.6 + 0.5 * absf(seed_pt.y)), span) - 12.0
+		var wy := (seed_pt.y * 0.5 + 0.5) * float(Sim.world.h)
+		var p := _tile_to_screen(Vector2(wx, wy))
+		var r := zoom * (2.2 + 2.6 * absf(seed_pt.x))
+		if p.x < -r * 3.0 or p.x > size.x + r * 3.0:
+			continue
+		if p.y < -r * 3.0 or p.y > size.y + r * 3.0:
+			continue
+		# Three overlapping ellipses read as a cloud and cost three calls.
+		for lobe in 3:
+			var o := _scatter[(k * 11 + lobe * 53) % _scatter.size()]
+			var c := p + Vector2(o.x * r * 1.1, o.y * r * 0.30)
+			_overlay.draw_circle(c, r * (0.62 + 0.24 * absf(o.y)),
+					Color(col.r, col.g, col.b, alpha))
 
 
 # --- Legend -----------------------------------------------------------------

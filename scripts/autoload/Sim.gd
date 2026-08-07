@@ -85,6 +85,10 @@ var lifetime_output: float = 0.0
 
 # --- Season, chronicle, notables ---
 var season: int = 0
+## Index into Balance.WEATHER, and the day it runs until. Weather is the fast
+## rhythm under the season's slow one - a few days at a time, unannounced.
+var weather: int = 0
+var weather_until: float = 0.0
 ## Significant entries kept as the civilisation's own history.
 var chronicle: Array[Dictionary] = []
 ## Named individuals attached to things that actually happened.
@@ -129,6 +133,12 @@ var festival_until: float = -1.0
 var festival_cooldown: float = 0.0
 ## Founded by hand on walked ground. tile -> richness contribution.
 var outposts: Array[Dictionary] = []
+## Second (and third, and fourth) places people live. Bought with points earned
+## by growing, not with resources alone - see Balance.SETTLEMENT_POP_THRESHOLDS.
+var settlements: Array[Dictionary] = []
+var settlement_points: int = 0
+## How many population thresholds have already paid out, so each pays once.
+var _settlements_earned: int = 0
 var log_entries: Array[Dictionary] = []
 
 # Cached readouts the UI wants but should not recompute.
@@ -226,6 +236,8 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_milestone = 0
 	lifetime_output = 0.0
 	season = 0
+	weather = 0
+	weather_until = 0.0
 	chronicle.clear()
 	notables.clear()
 	beat = 0
@@ -250,6 +262,9 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	festival_until = -1.0
 	festival_cooldown = 0.0
 	outposts.clear()
+	settlements.clear()
+	settlement_points = 0
+	_settlements_earned = 0
 	_mine_bonus_days = -1.0
 	_endowed = false
 	_council_cooldown = Balance.COUNCIL_INTERVAL_DAYS * 0.6
@@ -453,30 +468,33 @@ func _step(dt: float, offline: bool = false) -> void:
 		_maybe_disaster(dt, offline)
 	_check_era()
 	_check_milestones(offline)
+	_check_settlement_points()
 
 
 ## The worked land grows with the population and with technology, but never
 ## past where somebody has actually walked. That gate is the entire reason
 ## explorers exist.
 func _update_territory() -> void:
-	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY
+	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY \
+			+ float(settlements.size()) * Balance.SETTLEMENT_TERRITORY
 	if decree != "":
 		bonus += float(Balance.DECREES[decree].get("territory", 0.0))
 	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + bonus
 	var walked := world.explored_radius - Balance.CLAIM_MARGIN
 	world.territory_radius = clampf(minf(want, walked),
-			Balance.BASE_TERRITORY_RADIUS, Balance.MAX_TERRITORY_RADIUS)
+			Balance.BASE_TERRITORY_RADIUS, max_territory_radius())
 	world.refresh_territory()
 
 
 ## True when the settlement wants more land than it has been shown - the signal
 ## that explorers are the bottleneck right now.
 func expansion_blocked_by_exploration() -> bool:
-	if world.territory_radius >= Balance.MAX_TERRITORY_RADIUS:
+	if world.territory_radius >= max_territory_radius():
 		return false
 	if not world.frontier_open():
 		return false
-	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY
+	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY \
+			+ float(settlements.size()) * Balance.SETTLEMENT_TERRITORY
 	if decree != "":
 		bonus += float(Balance.DECREES[decree].get("territory", 0.0))
 	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + bonus
@@ -725,6 +743,7 @@ func surge(days: float) -> void:
 
 func _daily_world_tick() -> void:
 	season = int(fmod(day, Balance.DAYS_PER_YEAR) / (Balance.DAYS_PER_YEAR * 0.25)) % 4
+	_roll_weather()
 	_run_trade()
 	_check_beats()
 	_check_achievements()
@@ -1027,6 +1046,139 @@ func festival_active() -> bool:
 
 # --- Outposts ---------------------------------------------------------------
 
+## The ceiling on worked land. Settlements raise it, which is the only way the
+## reach grows once the home circle is at its limit.
+##
+## Territory is modelled as one circle centred on the first settlement, so a new
+## settlement widens that circle rather than claiming its own ground where it
+## actually stands. That is a real simplification and it shows: found one
+## sixteen tiles east and the land sixteen tiles *west* is claimed too. Proper
+## multi-centre territory is the honest fix and it touches the whole
+## territory/worker-spot path, so it is not done here.
+func max_territory_radius() -> float:
+	return Balance.MAX_TERRITORY_RADIUS \
+			+ float(settlements.size()) * Balance.SETTLEMENT_TERRITORY
+
+
+# --- Weather ----------------------------------------------------------------
+
+## Roll a new spell of weather when the last one runs out. Weighted by season,
+## so snow belongs to winter and long clear spells to summer without any of that
+## being special-cased anywhere.
+func _roll_weather() -> void:
+	if day < weather_until:
+		return
+	var total := 0.0
+	for w in Balance.WEATHER:
+		total += float((w["weight"] as Array)[season])
+	if total <= 0.0:
+		return
+	var roll := rng.randf() * total
+	for i in Balance.WEATHER.size():
+		roll -= float((Balance.WEATHER[i]["weight"] as Array)[season])
+		if roll <= 0.0:
+			var changed := i != weather
+			weather = i
+			weather_until = day + rng.randf_range(
+					Balance.WEATHER_MIN_DAYS, Balance.WEATHER_MAX_DAYS)
+			if changed and Settings.verbose_log:
+				add_log(String(Balance.WEATHER[i]["note"]), "info")
+			return
+
+
+func weather_info() -> Dictionary:
+	return Balance.WEATHER[clampi(weather, 0, Balance.WEATHER.size() - 1)]
+
+
+func weather_name() -> String:
+	return String(weather_info()["name"])
+
+
+# --- Settlements ------------------------------------------------------------
+
+## Points are earned by growing, one per population threshold crossed. Called
+## from the milestone check, so it is on the same cadence as everything else
+## that reacts to the settlement getting bigger.
+func _check_settlement_points() -> void:
+	while _settlements_earned < Balance.SETTLEMENT_POP_THRESHOLDS.size() \
+			and population >= Balance.SETTLEMENT_POP_THRESHOLDS[_settlements_earned]:
+		_settlements_earned += 1
+		settlement_points += 1
+		add_log("There are enough of you to settle somewhere else. "
+				+ "Found a new settlement from the Rule tab.", "era")
+		_chronicle("Enough people to found a second place to live.", "era")
+
+
+## The cheat. Deliberately a plain function rather than something hidden - it is
+## for trying the system out before the thresholds are tuned.
+func grant_settlement_point() -> void:
+	settlement_points += 1
+	add_log("A settlement point is granted.", "good")
+	state_changed.emit()
+
+
+## A share of what is in store, rising with each settlement already founded.
+func settlement_cost() -> Dictionary:
+	var scale := pow(Balance.SETTLEMENT_COST_GROWTH, float(settlements.size()))
+	var out := {}
+	for res in Balance.SETTLEMENT_COST_FRACTION:
+		var frac := minf(float(Balance.SETTLEMENT_COST_FRACTION[res]) * scale,
+				Balance.SETTLEMENT_MAX_FRACTION)
+		out[res] = float(resources.get(res, 0.0)) * frac
+	return out
+
+
+## Can a settlement go here? A point in hand, walked ground, well clear of home
+## and of every other settlement.
+func can_found_settlement(tile: int) -> bool:
+	if settlement_points <= 0 or world == null:
+		return false
+	if tile < 0 or tile >= world.explored.size() or world.explored[tile] == 0:
+		return false
+	if not world.workable(tile) or Balance.is_water_biome(world.biome[tile]):
+		return false
+	if Vector2(world.tile_pos(tile) - world.origin).length() < Balance.SETTLEMENT_MIN_DISTANCE:
+		return false
+	for s in settlements:
+		if Vector2(world.tile_pos(int(s["tile"])) - world.tile_pos(tile)).length() \
+				< Balance.SETTLEMENT_SPACING:
+			return false
+	# The floors are eligibility, not price: you must have a real store before
+	# you can spend a share of it.
+	for res in Balance.SETTLEMENT_BASE_COST:
+		if resources.get(res, 0.0) < float(Balance.SETTLEMENT_BASE_COST[res]):
+			return false
+	return true
+
+
+func found_settlement(tile: int) -> bool:
+	if not can_found_settlement(tile):
+		return false
+	var cost := settlement_cost()
+	for res in cost:
+		resources[res] -= float(cost[res])
+	settlement_points -= 1
+	settlements.append({"tile": tile, "value": outpost_value(tile)})
+	_mods_dirty = true
+	var far := int(Vector2(world.tile_pos(tile) - world.origin).length())
+	add_log("A new settlement is founded %d tiles out. People live there now, "
+			% far + "and the land around it is yours.", "era")
+	_chronicle("A second settlement founded %d tiles out." % far, "era")
+	_add_notable("settlement", "They led the party that built the new town.")
+	state_changed.emit()
+	return true
+
+
+## Everything the settlements add to the home economy. Same shape as an
+## outpost's contribution, scaled up - a settlement works its ground properly.
+func settlement_production(res: String) -> float:
+	var total := 0.0
+	for s in settlements:
+		var v: Dictionary = s.get("value", {})
+		total += float(v.get(res, 0.0)) * Balance.SETTLEMENT_YIELD_SCALE
+	return total
+
+
 func outpost_cost() -> Dictionary:
 	var scale := pow(Balance.OUTPOST_COST_GROWTH, float(outposts.size()))
 	var out := {}
@@ -1317,6 +1469,9 @@ func _mult(kind: String) -> float:
 	if decree != "":
 		m *= float((Balance.DECREES[decree]["penalty"] as Dictionary).get(kind, 1.0))
 	m *= float((Balance.SEASONS[season]["mult"] as Dictionary).get(kind, 1.0))
+	# Weather sits under the season: a small, fast-changing term on top of a
+	# large, slow, predictable one.
+	m *= float((weather_info()["mult"] as Dictionary).get(kind, 1.0))
 	return m
 
 
@@ -1409,10 +1564,12 @@ func _produce(dt: float) -> void:
 		resources["ore"] += o_rate * dt
 		resources["gold"] += g_rate * dt
 
-	# Outposts: flat daily production from ground held out past the frontier.
-	if not outposts.is_empty():
+	# Outposts and settlements: flat daily production from ground held out past
+	# the frontier. An outpost sends things home; a settlement works its own
+	# country properly and sends home a good deal more.
+	if not outposts.is_empty() or not settlements.is_empty():
 		for res in ["food", "wood", "ore", "stone"]:
-			var op := outpost_production(res)
+			var op := outpost_production(res) + settlement_production(res)
 			if op > 0.0:
 				production[res] += op
 				resources[res] += op * dt
@@ -1542,7 +1699,7 @@ func _consume_and_grow(dt: float) -> void:
 
 
 func _housing_total() -> float:
-	var total := Balance.BASE_HOUSING
+	var total := Balance.BASE_HOUSING + float(settlements.size()) * Balance.SETTLEMENT_HOUSING
 	for id in buildings:
 		var count: int = buildings[id]
 		if count <= 0:
@@ -2877,7 +3034,12 @@ func to_dict() -> Dictionary:
 		"festival_until": festival_until,
 		"festival_cooldown": festival_cooldown,
 		"outposts": outposts.duplicate(true),
+		"settlements": settlements.duplicate(true),
+		"settlement_points": settlement_points,
+		"settlements_earned": _settlements_earned,
 		"season": season,
+		"weather": weather,
+		"weather_until": weather_until,
 		"beat": beat,
 		"trade_sell": trade_sell,
 		"trade_buy": trade_buy,
@@ -2936,6 +3098,8 @@ func from_dict(d: Dictionary) -> void:
 	festival_until = float(d.get("festival_until", -1.0))
 	festival_cooldown = float(d.get("festival_cooldown", 0.0))
 	season = int(d.get("season", 0))
+	weather = clampi(int(d.get("weather", 0)), 0, Balance.WEATHER.size() - 1)
+	weather_until = float(d.get("weather_until", 0.0))
 	beat = int(d.get("beat", 0))
 	trade_sell = String(d.get("trade_sell", ""))
 	trade_buy = String(d.get("trade_buy", ""))
@@ -2950,6 +3114,12 @@ func from_dict(d: Dictionary) -> void:
 			notables.append(n)
 	_mine_bonus_days = float(d.get("mine_bonus_days", -1.0))
 	_endowed = bool(d.get("endowed", false))
+	settlement_points = int(d.get("settlement_points", 0))
+	_settlements_earned = int(d.get("settlements_earned", 0))
+	settlements.clear()
+	for sv in d.get("settlements", []):
+		if sv is Dictionary:
+			settlements.append({"tile": int(sv.get("tile", 0)), "value": sv.get("value", {})})
 	outposts.clear()
 	for o in d.get("outposts", []):
 		if o is Dictionary:
