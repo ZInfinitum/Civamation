@@ -173,6 +173,7 @@ scripts/
 tools/headless_sim.gd    autopilot harness + save round-trip test
 tools/screenshot.gd      render a real frame to a PNG
 docs/GDD.md              the full design document - every system, in one place
+docs/NEXT_STEPS.md       everything worth building next, ranked
 docs/DESIGN.md           how the simulation works and why
 docs/PLATFORMS.md        what shipping to Steam, Xbox, console and web takes
 docs/NEXT.md             how much detail this can afford, and what to build next
