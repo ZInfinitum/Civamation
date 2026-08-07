@@ -70,6 +70,10 @@ var can_cross_mountains := false
 var origin := Vector2i.ZERO
 var territory_radius: float = Balance.BASE_TERRITORY_RADIUS
 var territory := PackedInt32Array()
+## Scratch for the territory union: a stamp per tile, so overlapping claims do
+## not add the same tile twice without allocating a set every rebuild.
+var _claim_seen := PackedByteArray()
+var _claim_stamp := 0
 
 ## Territory aggregates that only change when the territory does. Recomputing
 ## these every substep was most of the simulation's cost once the map got big.
@@ -700,30 +704,66 @@ func refresh_visibility(scout_tiles: PackedInt32Array, scout_sight: int) -> void
 
 # --- Territory --------------------------------------------------------------
 
+## Every place the civilisation claims land from, as {"pos": Vector2i, "r": float}.
+##
+## Territory used to be a single circle around the first settlement, so founding
+## a town sixteen tiles east also claimed the ground sixteen tiles *west*. It is
+## a union of circles now - one per settlement - which is what a second town
+## actually is. Set by Sim; the home circle is always element zero.
+var claims: Array[Dictionary] = []
+
+
 func refresh_territory(force: bool = false) -> void:
-	# Rebuild on either input: the claim radius, or newly walked ground inside
-	# it. Watching only the radius left the worked land lagging the fog.
-	if not force and absf(territory_radius - _cached_radius) < 0.25 \
+	# Rebuild on either input: the claim radii, or newly walked ground inside
+	# them. Watching only the radius left the worked land lagging the fog.
+	var signature := territory_radius
+	for c in claims:
+		signature += float(c["r"]) * 7.31 + float(int(c["pos"].x) * 31 + int(c["pos"].y))
+	if not force and absf(signature - _cached_radius) < 0.25 \
 			and explored_count == _cached_explored:
 		return
-	_cached_radius = territory_radius
+	_cached_radius = signature
 	_cached_explored = explored_count
+
+	# The home circle is implicit when nobody has told us otherwise.
+	var centres := claims
+	if centres.is_empty():
+		centres = [{"pos": origin, "r": territory_radius}]
+
+	# Union, so overlapping settlements do not claim the same tile twice. The
+	# seen-set is a byte array rather than a Dictionary: this runs whenever the
+	# fog moves, and it is the only allocation in the path.
+	if _claim_seen.size() != w * h:
+		_claim_seen.resize(w * h)
+	_claim_stamp += 1
+	if _claim_stamp > 250:
+		# Wrapped: clear rather than let a stale stamp read as claimed.
+		for k in _claim_seen.size():
+			_claim_seen[k] = 0
+		_claim_stamp = 1
+
 	var list := PackedInt32Array()
-	var r := int(ceil(territory_radius))
-	var r2 := territory_radius * territory_radius
-	for oy in range(-r, r + 1):
-		for ox in range(-r, r + 1):
-			if float(ox * ox + oy * oy) > r2:
-				continue
-			var x := origin.x + ox
-			var y := origin.y + oy
-			if not in_bounds(x, y):
-				continue
-			var i := idx(x, y)
-			# You cannot work land nobody has walked.
-			if explored[i] == 0 or not workable(i):
-				continue
-			list.append(i)
+	for c in centres:
+		var pos: Vector2i = c["pos"]
+		var rad := float(c["r"])
+		var r := int(ceil(rad))
+		var r2 := rad * rad
+		for oy in range(-r, r + 1):
+			for ox in range(-r, r + 1):
+				if float(ox * ox + oy * oy) > r2:
+					continue
+				var x := pos.x + ox
+				var y := pos.y + oy
+				if not in_bounds(x, y):
+					continue
+				var i := idx(x, y)
+				if _claim_seen[i] == _claim_stamp:
+					continue
+				# You cannot work land nobody has walked.
+				if explored[i] == 0 or not workable(i):
+					continue
+				_claim_seen[i] = _claim_stamp
+				list.append(i)
 	territory = list
 	_recompute_static_totals()
 

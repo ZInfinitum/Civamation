@@ -619,6 +619,12 @@ const TECHS := {
 		"desc": "Stop following the herds. Unlocks Huts and Woodsheds.",
 		"effects": {"territory": 2.0, "birth_mult": 1.15}
 	},
+	"trackways": {
+		"name": "Trackways", "cost": 130.0, "requires": ["settlement"], "era": 2,
+		"desc": "Split logs laid over the soft ground between one place and the next. "
+				+ "A cart can get through, and towns stop being islands.",
+		"effects": {"territory": 1.0, "yield_mult": {"explore": 1.15, "build": 1.08}}
+	},
 	"basketry": {
 		"name": "Basketry", "cost": 48.0, "requires": ["settlement"], "era": 1,
 		"desc": "Woven carriers for everything worth carrying.",
@@ -703,6 +709,12 @@ const TECHS := {
 		"name": "Roads", "cost": 21000.0, "requires": ["steelmaking"], "era": 5,
 		"desc": "Metalled and drained, and they do not wash out in spring. Everything moves further.",
 		"effects": {"territory": 4.0, "yield_mult": {"explore": 1.5, "stone": 1.2, "housing_mult": 1.2}}
+	},
+	"macadam": {
+		"name": "Macadam", "cost": 480000.0, "requires": ["mechanisation"], "era": 7,
+		"desc": "Crushed stone, bound and rolled flat. Everything moves twice as far in a "
+				+ "day as it did, and the towns start to behave like one place.",
+		"effects": {"territory": 3.0, "yield_mult": {"explore": 1.6, "build": 1.3}}
 	},
 	"aqueducts": {
 		"name": "Aqueducts", "cost": 28000.0, "requires": ["roads", "mathematics"], "era": 5,
@@ -1122,19 +1134,22 @@ const WEATHER := [
 	{
 		"id": "rain", "name": "Rain", "color": Color("7f9ab0"), "clouds": 0.95,
 		"note": "Steady rain. The fields drink and nobody else enjoys it.",
-		"mult": {"farm": 1.20, "forage": 1.10, "build": 0.90, "explore": 0.85},
+		"mult": {"farm": 1.20, "forage": 1.30, "build": 0.90, "explore": 0.85},
+		"regrowth": {"forage": 1.40, "forest": 1.25},
 		"weight": [1.4, 0.8, 1.1, 0.7],
 	},
 	{
 		"id": "storm", "name": "Storm", "color": Color("5f7183"), "clouds": 1.0,
 		"note": "Wind and water together. Everyone who can be indoors is.",
 		"mult": {"build": 0.70, "explore": 0.60, "game": 0.85, "farm": 1.10},
+		"regrowth": {"forage": 1.15},
 		"weight": [0.5, 0.4, 0.7, 0.6],
 	},
 	{
 		"id": "snow", "name": "Snow", "color": Color("dfe9f2"), "clouds": 0.85,
 		"note": "Snow, and the country goes quiet.",
 		"mult": {"farm": 0.80, "forage": 0.75, "explore": 0.70, "build": 0.85},
+		"regrowth": {"game": 0.70, "forage": 0.50},
 		"weight": [0.15, 0.0, 0.10, 1.6],
 	},
 ]
@@ -1142,6 +1157,106 @@ const WEATHER := [
 ## How long one spell of weather lasts, in days, before another is rolled.
 const WEATHER_MIN_DAYS := 2.0
 const WEATHER_MAX_DAYS := 7.0
+
+## --- Climate ----------------------------------------------------------------
+## The reference climate is **Seattle**: 47.6 degrees north, a mild maritime
+## year with a small annual swing and a very large swing in daylight.
+##
+## Temperature is two cosines - one for the year, one for the day - which is
+## the standard first approximation and is accurate to a degree or two against
+## the real monthly means:
+##
+##   January mean about 5 C, July mean about 19 C, annual mean about 12 C
+##   coldest around the start of January, warmest late July
+##   about 8 degrees between the night low and the afternoon high
+##
+## The year here is 360 days rather than 365, so the phase constants are in
+## fractions of a year and not in calendar dates.
+const TEMP_ANNUAL_MEAN := 11.8
+const TEMP_ANNUAL_SWING := 7.0
+## Fraction of the year at which it is coldest. Day 5 of 360.
+const TEMP_COLDEST_PHASE := 0.014
+## Half the difference between the pre-dawn low and the afternoon high.
+const TEMP_DAILY_SWING := 4.0
+## The hour the daily peak lands on. Not noon - the ground keeps warming.
+const TEMP_PEAK_HOUR := 15.0
+
+## Seattle's latitude, which is what makes the winter days so short.
+const LATITUDE_DEG := 47.6
+## Daylight never quite collapses or saturates at this latitude, but clamp
+## anyway so a pathological value cannot produce a day of negative length.
+const DAYLIGHT_MIN_HOURS := 7.5
+const DAYLIGHT_MAX_HOURS := 16.5
+
+## Below this the ground freezes: precipitation falls as snow and lies.
+const FREEZING_C := 0.0
+## Centimetres of snow laid down per day of snowfall.
+const SNOW_PER_DAY := 7.0
+## And how fast it goes once the temperature climbs, per degree above freezing
+## per day. A warm afternoon takes a real bite out of it.
+const SNOW_MELT_PER_DEGREE_DAY := 1.9
+## Snow deeper than this slows movement as much as it ever will.
+const SNOW_DEEP_CM := 25.0
+## What that costs at full depth: exploring and building are movement, and
+## hunting means walking a long way in it.
+const SNOW_MOVEMENT_PENALTY := {"explore": 0.45, "build": 0.75, "game": 0.80}
+
+
+## Hours of daylight on a given day, from the standard sunrise equation.
+static func daylight_hours(day: float) -> float:
+	# Solar declination through the year. Phase is measured from the winter
+	# solstice, which sits a fortnight before the coldest part of the year.
+	var year_frac := fposmod(day, DAYS_PER_YEAR) / DAYS_PER_YEAR
+	var decl := deg_to_rad(-23.44) * cos(TAU * year_frac)
+	var lat := deg_to_rad(LATITUDE_DEG)
+	var cos_h := -tan(lat) * tan(decl)
+	if cos_h <= -1.0:
+		return DAYLIGHT_MAX_HOURS
+	if cos_h >= 1.0:
+		return DAYLIGHT_MIN_HOURS
+	return clampf(2.0 * rad_to_deg(acos(cos_h)) / 15.0,
+			DAYLIGHT_MIN_HOURS, DAYLIGHT_MAX_HOURS)
+
+
+## The hour the sun comes up, and the hour it goes down.
+static func sunrise_hour(day: float) -> float:
+	return 12.0 - daylight_hours(day) * 0.5
+
+
+static func sunset_hour(day: float) -> float:
+	return 12.0 + daylight_hours(day) * 0.5
+
+
+## Where in the day we are, as an hour from 0 to 24.
+static func hour_of_day(day: float) -> float:
+	return fposmod(day, 1.0) * 24.0
+
+
+## How high the sun is, from 0 at the horizon to 1 at midday. Zero all night.
+## This is what the map darkens by, so it wants to be smooth rather than exact.
+static func sun_elevation(day: float) -> float:
+	var h := hour_of_day(day)
+	var rise := sunrise_hour(day)
+	var set_h := sunset_hour(day)
+	if h <= rise or h >= set_h:
+		return 0.0
+	return sin(PI * (h - rise) / maxf(set_h - rise, 0.001))
+
+
+static func is_night(day: float) -> bool:
+	return sun_elevation(day) <= 0.001
+
+
+## Temperature in Celsius: the year's cosine plus the day's.
+static func temperature_c(day: float) -> float:
+	var year_frac := fposmod(day, DAYS_PER_YEAR) / DAYS_PER_YEAR
+	var annual := -cos(TAU * (year_frac - TEMP_COLDEST_PHASE)) * TEMP_ANNUAL_SWING
+	var daily := cos(TAU * (hour_of_day(day) - TEMP_PEAK_HOUR) / 24.0) * TEMP_DAILY_SWING
+	return TEMP_ANNUAL_MEAN + annual + daily
+
+
+static func celsius_to_f(c: float) -> float:
+	return c * 9.0 / 5.0 + 32.0
 
 ## --- Settlements ------------------------------------------------------------
 ## An outpost is a place that sends things home. A settlement is a second place
@@ -1177,10 +1292,52 @@ const SETTLEMENT_COST_GROWTH := 1.40
 const SETTLEMENT_MIN_DISTANCE := 12.0
 ## And far enough from each other.
 const SETTLEMENT_SPACING := 9.0
-const SETTLEMENT_TERRITORY := 3.5
+## How far a settlement works out from itself, before technology.
+const SETTLEMENT_TERRITORY := 5.0
+## And how much of the empire's territory technology a settlement enjoys. Roads
+## and cartography widen the capital's reach; the towns get most of that too.
+const SETTLEMENT_TECH_SHARE := 0.6
 const SETTLEMENT_HOUSING := 140.0
 ## How much of the surrounding ground a settlement works, against an outpost's.
 const SETTLEMENT_YIELD_SCALE := 2.6
+
+## --- Roads ------------------------------------------------------------------
+## Two settlements whose claimed ground touches are neighbours, and neighbours
+## build a road. The road is not placed by the player - it is what happens when
+## two towns are close enough to walk between, which is the reward for siting
+## them thoughtfully rather than as far apart as the rules allow.
+##
+## What a road buys is time on the journey, which in a simulation with no
+## individual travel is expressed as the share of a town's output that actually
+## reaches the capital. A footpath loses a lot of it; a metalled road loses very
+## little. Each tier is unlocked by a technology, so roads improve across the
+## ages like everything else.
+const ROAD_TIERS := [
+	{
+		"id": "footpath", "tech": "", "name": "Footpaths",
+		"desc": "Trodden earth. Passable in summer, and a misery otherwise.",
+		"reach": 1.00, "color": Color("8a7c5e"), "width": 0.06,
+	},
+	{
+		"id": "trackway", "tech": "trackways", "name": "Trackways",
+		"desc": "Split logs laid over the soft ground. A cart can get through.",
+		"reach": 1.25, "color": Color("a8946c"), "width": 0.09,
+	},
+	{
+		"id": "road", "tech": "roads", "name": "Metalled Roads",
+		"desc": "Drained, cambered and stone-bedded. They do not wash out in spring.",
+		"reach": 1.60, "color": Color("c2b48d"), "width": 0.13,
+	},
+	{
+		"id": "macadam", "tech": "macadam", "name": "Macadam",
+		"desc": "Crushed stone bound and rolled flat. Everything moves twice as far in a day.",
+		"reach": 2.10, "color": Color("ddd3b4"), "width": 0.17,
+	},
+]
+
+## An unconnected settlement keeps only this share of what it produces - the
+## rest is eaten by the journey. Connecting one is a real gain, not a rounding.
+const ROAD_ISOLATED_REACH := 0.55
 
 ## --- Wildlife density -------------------------------------------------------
 ## One animal marker used to mean "there is wildlife here", which told the player
@@ -1211,21 +1368,28 @@ const SEASONS := [
 		"name": "Spring", "color": Color("8fbf6a"),
 		"note": "Everything green at once, and nothing ripe yet.",
 		"mult": {"forage": 1.35, "farm": 0.85, "game": 1.05, "explore": 1.15},
+		# Regrowth, not yield: the herds and the greenery genuinely multiply in
+		# spring and genuinely do not in winter. This is what makes the animals
+		# on the map thicken and thin with the year rather than only the numbers.
+		"regrowth": {"game": 1.60, "forage": 1.70, "forest": 1.35},
 	},
 	{
 		"name": "Summer", "color": Color("d9a441"),
 		"note": "Long days. The fields do the work.",
 		"mult": {"farm": 1.45, "forage": 1.15, "game": 0.85, "build": 1.15},
+		"regrowth": {"game": 1.35, "forage": 1.30, "forest": 1.25},
 	},
 	{
 		"name": "Autumn", "color": Color("c9803f"),
 		"note": "The harvest and the hunt, both at once, and no time to waste.",
 		"mult": {"farm": 1.30, "game": 1.45, "forage": 1.05, "timber": 1.15},
+		"regrowth": {"game": 0.75, "forage": 0.55, "forest": 0.85},
 	},
 	{
 		"name": "Winter", "color": Color("8fa8bf"),
 		"note": "What is in the store is what there is.",
 		"mult": {"farm": 0.52, "forage": 0.64, "game": 0.88, "build": 0.85, "explore": 0.7},
+		"regrowth": {"game": 0.35, "forage": 0.20, "forest": 0.45},
 	},
 ]
 
@@ -1663,3 +1827,9 @@ static func fmt_clock(day: float) -> String:
 static func fmt_rate(value: float) -> String:
 	var s := "+" if value >= 0.0 else "-"
 	return s + fmt(absf(value), 2)
+
+
+## An hour of the day as a clock time - "06:42".
+static func fmt_hour(h: float) -> String:
+	var total := int(round(fposmod(h, 24.0) * 60.0))
+	return "%02d:%02d" % [(total / 60) % 24, total % 60]

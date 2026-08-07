@@ -107,6 +107,9 @@ var season: int = 0
 ## rhythm under the season's slow one - a few days at a time, unannounced.
 var weather: int = 0
 var weather_until: float = 0.0
+## Centimetres of lying snow. Outlives the snowfall that made it and melts back
+## with the temperature, so a hard week costs movement well after the sky clears.
+var snow_depth: float = 0.0
 ## Significant entries kept as the civilisation's own history.
 var chronicle: Array[Dictionary] = []
 ## Named individuals attached to things that actually happened.
@@ -257,6 +260,7 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	season = 0
 	weather = 0
 	weather_until = 0.0
+	snow_depth = 0.0
 	chronicle.clear()
 	notables.clear()
 	beat = 0
@@ -470,6 +474,7 @@ func _step(dt: float, offline: bool = false) -> void:
 	_explore(dt, offline)
 	_ecology(dt)
 	_produce(dt)
+	_update_snow(dt)
 	_consume_and_grow(dt)
 	_progress_builds(dt)
 	_progress_research(dt)
@@ -494,15 +499,28 @@ func _step(dt: float, offline: bool = false) -> void:
 ## past where somebody has actually walked. That gate is the entire reason
 ## explorers exist.
 func _update_territory() -> void:
-	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY \
-			+ float(settlements.size()) * Balance.SETTLEMENT_TERRITORY
+	var bonus := _territory_bonus + float(outposts.size()) * Balance.OUTPOST_TERRITORY
 	if decree != "":
 		bonus += float(Balance.DECREES[decree].get("territory", 0.0))
 	var want := Balance.BASE_TERRITORY_RADIUS + population * Balance.TERRITORY_PER_POP + bonus
 	var walked := world.explored_radius - Balance.CLAIM_MARGIN
 	world.territory_radius = clampf(minf(want, walked),
 			Balance.BASE_TERRITORY_RADIUS, max_territory_radius())
+
+	# Each settlement claims the ground around *itself*. A second town sixteen
+	# tiles east used to widen the circle around the first one, which also
+	# claimed the ground sixteen tiles west - land nobody had ever been near.
+	var claims: Array[Dictionary] = [{"pos": world.origin, "r": world.territory_radius}]
+	for s in settlements:
+		claims.append({"pos": world.tile_pos(int(s["tile"])), "r": settlement_radius()})
+	world.claims = claims
 	world.refresh_territory()
+
+
+## How far a settlement works out from itself. Grows with the same technologies
+## that widen the home circle, so towns keep pace with the capital.
+func settlement_radius() -> float:
+	return Balance.SETTLEMENT_TERRITORY + _territory_bonus * Balance.SETTLEMENT_TECH_SHARE
 
 
 ## True when the settlement wants more land than it has been shown - the signal
@@ -1069,18 +1087,10 @@ func festival_active() -> bool:
 
 # --- Outposts ---------------------------------------------------------------
 
-## The ceiling on worked land. Settlements raise it, which is the only way the
-## reach grows once the home circle is at its limit.
-##
-## Territory is modelled as one circle centred on the first settlement, so a new
-## settlement widens that circle rather than claiming its own ground where it
-## actually stands. That is a real simplification and it shows: found one
-## sixteen tiles east and the land sixteen tiles *west* is claimed too. Proper
-## multi-centre territory is the honest fix and it touches the whole
-## territory/worker-spot path, so it is not done here.
+## The ceiling on the *home* circle. Settlements no longer raise it - they claim
+## their own ground instead, which is what a second town actually is.
 func max_territory_radius() -> float:
-	return Balance.MAX_TERRITORY_RADIUS \
-			+ float(settlements.size()) * Balance.SETTLEMENT_TERRITORY
+	return Balance.MAX_TERRITORY_RADIUS
 
 
 # --- Weather ----------------------------------------------------------------
@@ -1109,6 +1119,44 @@ func _roll_weather() -> void:
 			return
 
 
+## Lay down snow while it falls and the ground is frozen; take it away again as
+## the temperature climbs. Snow is the one weather effect that outlives the
+## weather that made it - it is still there, and still slowing everyone down,
+## days after the sky cleared, which is the whole reason it is a stock and not
+## another multiplier.
+func _update_snow(dt: float) -> void:
+	var t := temperature()
+	if String(weather_info()["id"]) == "snow" and t <= Balance.FREEZING_C + 1.0:
+		snow_depth += Balance.SNOW_PER_DAY * dt
+	elif t > Balance.FREEZING_C:
+		snow_depth = maxf(0.0, snow_depth
+				- (t - Balance.FREEZING_C) * Balance.SNOW_MELT_PER_DEGREE_DAY * dt)
+	snow_depth = clampf(snow_depth, 0.0, 120.0)
+
+
+## Current temperature in Celsius, which varies through the day as well as
+## through the year.
+func temperature() -> float:
+	return Balance.temperature_c(day)
+
+
+func temperature_f() -> float:
+	return Balance.celsius_to_f(temperature())
+
+
+## 0 when the ground is bare, 1 when the snow is as deep as it matters.
+func snow_cover() -> float:
+	return clampf(snow_depth / Balance.SNOW_DEEP_CM, 0.0, 1.0)
+
+
+func is_night() -> bool:
+	return Balance.is_night(day)
+
+
+func sun_elevation() -> float:
+	return Balance.sun_elevation(day)
+
+
 func weather_info() -> Dictionary:
 	return Balance.WEATHER[clampi(weather, 0, Balance.WEATHER.size() - 1)]
 
@@ -1132,11 +1180,31 @@ func _check_settlement_points() -> void:
 		_chronicle("Enough people to found a second place to live.", "era")
 
 
-## The cheat. Deliberately a plain function rather than something hidden - it is
-## for trying the system out before the thresholds are tuned.
+## The cheats. Deliberately plain functions rather than something hidden - they
+## are for trying a system out before its thresholds are tuned, and the fastest
+## way to find out whether something is any fun is to give yourself it.
 func grant_settlement_point() -> void:
 	settlement_points += 1
 	add_log("A settlement point is granted.", "good")
+	state_changed.emit()
+
+
+func cheat_add_resources(amount: float) -> void:
+	for id in Balance.RESOURCE_ORDER:
+		resources[id] = maxf(0.0, float(resources[id]) + amount)
+	add_log("%s of every resource, from nowhere." % Balance.fmt_count(amount), "good")
+	state_changed.emit()
+
+
+func cheat_add_population(amount: float) -> void:
+	population = maxf(Balance.MIN_POPULATION, population + amount)
+	# Raise the high-water mark too, or the never-lose floor stays where it was
+	# and the new arrivals simply die back to it - which looks like the cheat
+	# not working rather than like the floor working.
+	peak_population = maxf(peak_population, population)
+	Profile.note_population(population)
+	add_log("%s people arrive, from nowhere." % Balance.fmt_count(amount), "good")
+	_auto_assign_jobs()
 	state_changed.emit()
 
 
@@ -1192,13 +1260,74 @@ func found_settlement(tile: int) -> bool:
 	return true
 
 
-## Everything the settlements add to the home economy. Same shape as an
-## outpost's contribution, scaled up - a settlement works its ground properly.
-func settlement_production(res: String) -> float:
-	var total := 0.0
+## The best road the civilisation knows how to build, as an index into
+## Balance.ROAD_TIERS.
+func road_tier() -> int:
+	var best := 0
+	for i in Balance.ROAD_TIERS.size():
+		var tech := String(Balance.ROAD_TIERS[i]["tech"])
+		if tech == "" or techs.has(tech):
+			best = i
+	return best
+
+
+func road_info() -> Dictionary:
+	return Balance.ROAD_TIERS[road_tier()]
+
+
+## Which places are joined by a road. A pair is joined when their claimed ground
+## touches - which is the point of siting a town within reach of another rather
+## than as far away as the rules allow.
+##
+## Index -1 is the capital; 0 and up are settlements. Returned as pairs so the
+## map can draw them and the economy can ask what is connected.
+func road_links() -> Array:
+	var out: Array = []
+	if world == null:
+		return out
+	var pts: Array[Vector2] = [Vector2(world.origin)]
+	var radii: Array[float] = [world.territory_radius]
 	for s in settlements:
-		var v: Dictionary = s.get("value", {})
-		total += float(v.get(res, 0.0)) * Balance.SETTLEMENT_YIELD_SCALE
+		pts.append(Vector2(world.tile_pos(int(s["tile"]))))
+		radii.append(settlement_radius())
+	for a in pts.size():
+		for b in range(a + 1, pts.size()):
+			if pts[a].distance_to(pts[b]) <= radii[a] + radii[b]:
+				out.append([a - 1, b - 1])
+	return out
+
+
+## True when this settlement can be reached over land from the capital, directly
+## or through other settlements. Built once per call rather than cached: there
+## are never more than a dozen towns.
+func _connected_settlements() -> Dictionary:
+	var reached := {-1: true}
+	var links := road_links()
+	# Repeated relaxation. With a handful of nodes this is cheaper and clearer
+	# than building an adjacency structure to walk properly.
+	for _pass in maxi(1, settlements.size()):
+		for l in links:
+			if reached.has(l[0]):
+				reached[l[1]] = true
+			if reached.has(l[1]):
+				reached[l[0]] = true
+	return reached
+
+
+## Everything the settlements add to the home economy. Same shape as an
+## outpost's contribution, scaled up - a settlement works its ground properly -
+## and then scaled again by how well it is joined to the rest of the country.
+## An isolated town keeps barely half of what it makes; the journey eats it.
+func settlement_production(res: String) -> float:
+	if settlements.is_empty():
+		return 0.0
+	var reach := float(road_info()["reach"])
+	var connected := _connected_settlements()
+	var total := 0.0
+	for i in settlements.size():
+		var v: Dictionary = settlements[i].get("value", {})
+		var share := reach if connected.has(i) else Balance.ROAD_ISOLATED_REACH
+		total += float(v.get(res, 0.0)) * Balance.SETTLEMENT_YIELD_SCALE * share
 	return total
 
 
@@ -1412,10 +1541,27 @@ func _note(text: String, offline: bool) -> void:
 ## Logistic regrowth toward capacity plus immigration from beyond the territory,
 ## so a hard-worked stock always recovers. Also the one pass that recomputes the
 ## living-stock totals the rest of the step reads.
+## How fast a living stock recovers right now: the season's term times the
+## weather's. Kept separate from _mult, which is about labour rather than about
+## the land.
+func _regrowth_mult(kind: String) -> float:
+	var m := float((Balance.SEASONS[season].get("regrowth", {}) as Dictionary).get(kind, 1.0))
+	m *= float((weather_info().get("regrowth", {}) as Dictionary).get(kind, 1.0))
+	return m
+
+
 func _ecology(dt: float) -> void:
 	var regrow := 1.0
 	if decree != "":
 		regrow = float(Balance.DECREES[decree].get("regrowth", 1.0))
+	# Seasons and weather act on the living stocks, not only on what a worker
+	# takes from them. Herds calve in spring and the greenery comes back after
+	# rain; both go quiet in the autumn and stop in the snow. Without this the
+	# year was only a set of multipliers on labour, and the country itself
+	# looked the same in February as in June.
+	var g_season := _regrowth_mult("game")
+	var f_season := _regrowth_mult("forage")
+	var w_season := _regrowth_mult("forest")
 	var tg := 0.0
 	var tf := 0.0
 	var tw := 0.0
@@ -1425,9 +1571,12 @@ func _ecology(dt: float) -> void:
 		if world.forest_cap[i] > 0.01:
 			cover = world.forest[i] / world.forest_cap[i]
 		var cap: float = world.game_cap[i] * (1.0 - Balance.HABITAT_WEIGHT + Balance.HABITAT_WEIGHT * cover)
-		tg += _grow(world.game, i, cap, Balance.GAME_REGROWTH * regrow, Balance.GAME_IMMIGRATION * regrow, dt)
-		tf += _grow(world.forage, i, world.forage_cap[i], Balance.FORAGE_REGROWTH * regrow, Balance.FORAGE_IMMIGRATION * regrow, dt)
-		tw += _grow(world.forest, i, world.forest_cap[i], Balance.FOREST_REGROWTH * regrow, Balance.FOREST_IMMIGRATION * regrow, dt)
+		tg += _grow(world.game, i, cap, Balance.GAME_REGROWTH * regrow * g_season,
+				Balance.GAME_IMMIGRATION * regrow * g_season, dt)
+		tf += _grow(world.forage, i, world.forage_cap[i], Balance.FORAGE_REGROWTH * regrow * f_season,
+				Balance.FORAGE_IMMIGRATION * regrow * f_season, dt)
+		tw += _grow(world.forest, i, world.forest_cap[i], Balance.FOREST_REGROWTH * regrow * w_season,
+				Balance.FOREST_IMMIGRATION * regrow * w_season, dt)
 		# One comparison per worked tile: woodland that has been cut flat turns
 		# into a clearing, and turns back once the trees are up again.
 		world.update_cover(i)
@@ -1495,6 +1644,15 @@ func _mult(kind: String) -> float:
 	# Weather sits under the season: a small, fast-changing term on top of a
 	# large, slow, predictable one.
 	m *= float((weather_info()["mult"] as Dictionary).get(kind, 1.0))
+
+	# And lying snow under both. This is the only term that persists after the
+	# thing that caused it has gone: everything that means walking a long way -
+	# scouting, carrying timber to a site, following a herd - gets slower until
+	# it melts.
+	var cover := snow_cover()
+	if cover > 0.01 and Balance.SNOW_MOVEMENT_PENALTY.has(kind):
+		var full := float(Balance.SNOW_MOVEMENT_PENALTY[kind])
+		m *= lerpf(1.0, full, cover)
 	return m
 
 
@@ -3064,6 +3222,7 @@ func to_dict() -> Dictionary:
 		"season": season,
 		"weather": weather,
 		"weather_until": weather_until,
+		"snow_depth": snow_depth,
 		"beat": beat,
 		"trade_sell": trade_sell,
 		"trade_buy": trade_buy,
@@ -3125,6 +3284,7 @@ func from_dict(d: Dictionary) -> void:
 	season = int(d.get("season", 0))
 	weather = clampi(int(d.get("weather", 0)), 0, Balance.WEATHER.size() - 1)
 	weather_until = float(d.get("weather_until", 0.0))
+	snow_depth = float(d.get("snow_depth", 0.0))
 	beat = int(d.get("beat", 0))
 	trade_sell = String(d.get("trade_sell", ""))
 	trade_buy = String(d.get("trade_buy", ""))
@@ -3195,5 +3355,12 @@ func from_dict(d: Dictionary) -> void:
 	_mods_dirty = true
 	_rebuild_mods()
 	world.from_dict(wd)
+	# Territory is derived from the settlements, and the settlements only exist
+	# once the block above has run - so the claims have to be rebuilt here. The
+	# world's own load restores a radius but knows nothing about which towns
+	# claim what, and without this a reloaded empire came back with the tiles of
+	# a single village.
+	_update_territory()
+	world.refresh_territory(true)
 	game_reset.emit()
 	state_changed.emit()
