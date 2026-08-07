@@ -11,6 +11,9 @@ buildings and pursues its own research — it plays itself competently and keeps
 growing, which is the point. It is something to have running on the side. Every
 one of those three autopilots has an off switch when you want the decisions.
 
+The whole design is written up in [docs/GDD.md](docs/GDD.md) — every system,
+mechanic, tile, animal, trade and number in one document.
+
 Underneath it is a real ecology model (see [docs/DESIGN.md](docs/DESIGN.md)),
 but a **hopeful** one. The herds always come back, the forest always grows
 back, and the settlement never falls below three quarters of the largest it has
@@ -28,6 +31,11 @@ polar ice), **Continents** (fewer, larger landmasses), **Islands**, or
 forest, rainforest, hills, mountains, desert and tundra are laid out by
 elevation, latitude and rainfall; mountains are impassable until you learn to
 cross them.
+
+Every world comes from a seed, and the pause menu hands it back as one copyable
+line — `482913 / Archipelago`. New World takes that whole line, or a bare
+number, or any words at all, which are hashed: `midsummer` is a perfectly good
+seed and always the same world.
 
 Tiles change. Fell a wood and it becomes a clearing until it grows back. Deer,
 wolves, rabbits and birds live where they would actually live and wander between
@@ -91,8 +99,8 @@ following, because none of it has an answer a planner could compute:
 
 The gap is measured, not asserted: `_test_engagement` in the harness runs the
 same seed twice, once left alone and once managed, and fails the build if
-managing does not win. It currently comes out at **1.2x population and ~40x
-lifetime output**.
+managing does not win. It currently comes out at roughly **1.6x population and
+100x+ lifetime output**.
 
 ## Artwork
 
@@ -132,6 +140,12 @@ which console certification will require later and which costs nothing now.
 | Slower | `[` | Left shoulder |
 | Zoom / pan the map | wheel, drag | — |
 
+Time runs day by day. Thirty seconds a day to start, then fifteen, then one,
+and a top speed of a second a month once the civilisation is old enough to have
+earned it. The map has a filter dropdown under it — everyone coloured by trade,
+everyone in one colour so the crowd reads as a crowd, how worn the land is, what
+is worth having on it, and how far the reach goes.
+
 Settings covers audio, fullscreen, vsync, interface scale, reduced motion, high
 contrast, autosave interval, a verbose log for play-testing, and natural
 disasters (fires, floods, hurricanes, tornados) which are **off by default** and
@@ -158,6 +172,7 @@ scripts/
   ui/WorldView.gd        the map, drawn with primitives
 tools/headless_sim.gd    autopilot harness + save round-trip test
 tools/screenshot.gd      render a real frame to a PNG
+docs/GDD.md              the full design document - every system, in one place
 docs/DESIGN.md           how the simulation works and why
 docs/PLATFORMS.md        what shipping to Steam, Xbox, console and web takes
 docs/NEXT.md             how much detail this can afford, and what to build next
