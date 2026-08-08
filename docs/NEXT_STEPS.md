@@ -9,11 +9,13 @@ Each item carries an honest **effort** (hours of focused work) and **impact**
 
 Status key: 🔴 known broken · 🟠 known gap · 🟡 design decision needed · 🟢 pure addition
 
-> **Revision 2.** Six items from revision 1 are done and have been removed:
-> night as a simulation (§2.1), settlement populations and migration (§2.2),
-> the population model becoming an age structure (§3.1), multi-centre territory
-> (§3.2), the tutorial being wired (§6.1, partially), and ore becoming discrete
-> seams. What replaced them are the problems those changes exposed.
+> **Revision 3.** Done and removed since revision 2: the food problem (§1.1 and
+> §1.3 — it was never spoilage or the floor, it was that three quarters of the
+> workforce had nowhere to stand), the hunger metric that was measuring
+> midnight, frame-rate independence, and the `new_game` state leak that proving
+> it uncovered. The audit went from five checks to twelve.
+>
+> Two items are **new and were found by tools**, not by playing: §5.7 and §1.6.
 
 ---
 
@@ -21,31 +23,15 @@ Status key: 🔴 known broken · 🟠 known gap · 🟡 design decision needed �
 
 If only five things get done, these five:
 
-1. **§1.1** — hunger sits at ~25% of the run and may be measuring nightfall
-2. **§1.2** — the ore-tier dead zone (still the biggest flat patch in the curve)
+1. **§6.1** — the tutorial exists but draws nothing
+2. **§1.2** — the ore-tier dead zone (now the oldest problem here)
 3. **§2.1** — towns cap at 140 people and cannot grow
-4. **§6.1** — the tutorial exists but draws nothing
-5. **§5.1** — export presets do not exist; the art pipeline would ship empty
+4. **§5.1** — export presets do not exist; the art pipeline would ship empty
+5. **§1.6** — output now reaches 1e18 by day 6,000; pacing needs a decision
 
 ---
 
 ## 1. Balance and pacing
-
-### 1.1 🔴 A quarter of the run is spent "hungry", and the number may be lying
-`food_satisfaction` is sampled instantaneously. Since people now sleep,
-production drops to ~18% of daily average at night while consumption continues —
-so any settlement without a full day of food in store dips below the famine
-threshold **every single night**, and the summary line reads "and hungry".
-
-Two possibilities and they need separating before either is fixed:
-- The metric is wrong: hunger should be measured on a rolling daily average.
-- The stores really are that thin, and the night cycle merely exposed it.
-
-Do the measurement first. If it is the metric, fix the metric and the UI string.
-If it is the stores, that is §1.3.
-
-**Effort** 2h to diagnose, 1–4h to fix · **Impact** high — it is the most
-visible recurring negative in the game
 
 ### 1.2 🔴 The ore-tier dead zone
 Unchanged from revision 1 and now the oldest known problem. All four ore tiers
@@ -55,16 +41,6 @@ next tech up the ladder, Mathematics, costs 16,000.
 Discrete seams help — there is now news underground after day 500 — but the
 *tiers* still run out. Raise Steelmaking to ~12,000, and/or add tiers above
 Steel (Crucible, Alloy, something industrial).
-
-**Effort** 3h · **Impact** high
-
-### 1.3 🟠 Food stores are thin at every scale
-Related to §1.1 but distinct: the granary rarely holds more than a few days.
-Preservation buildings (Fire Pit, Drying Rack, Granary) have flat effects that
-do not scale with era, so they matter less the bigger you get, exactly when
-buffering matters more.
-
-Fix: scale spoilage reduction with era or with a preservation tech line.
 
 **Effort** 3h · **Impact** high
 
@@ -84,9 +60,21 @@ spread properly — read it before tuning anything.
 
 **Effort** 0 (the soak does it) · **Impact** medium
 
-### 1.6 🟢 No difficulty / pace setting
-Unchanged. A "Leisurely / Standard / Brisk" scaling `SECONDS_PER_DAY` and the
-cost-growth constants.
+### 1.6 🟡 Output now reaches 1e18 by day 6,000
+The worksite fix employed the three quarters of the workforce that had nowhere
+to stand, and lifetime output went up by roughly a hundredfold as a result.
+That is arithmetic, not a bug — but it is a real pacing shift, and "too much
+power, too fast" has been a stated concern before.
+
+The single dial is the worksite multiplier chain, which currently compounds to
+about 27× across six technologies. Halving the exponents would still leave most
+people employed. Wants a decision rather than a fix.
+
+**Effort** 1h once decided · **Impact** high on feel
+
+### 1.7 🟢 No difficulty / pace setting
+A "Leisurely / Standard / Brisk" scaling `SECONDS_PER_DAY` and the cost-growth
+constants.
 
 **Effort** 2h · **Impact** medium
 
@@ -261,16 +249,29 @@ roads and the tutorial. The seams are obvious: `SimEcology`, `SimPeople`,
 
 **Effort** 8h · **Impact** zero visible, large on velocity
 
-### 5.5 🟢 The audit could check more
+### 5.7 🟠 Nothing checks that `new_game` resets what it should
+The state leak in §rev3 was found by accident, by a test written for something
+else. Eight caches survived a new game because nothing enumerated them. A check
+comparing the member variables declared in `Sim` against the ones `new_game`
+and `_reset_runtime_caches` touch would have caught it in seconds, and will
+catch the next one — every new cache variable is a candidate.
+
+This is the single highest-value check the audit does not yet have.
+
+**Effort** 2h · **Impact** high
+
+### 5.8 🟢 The audit could check more still
 `tools/audit.py` exists and gates CI. Natural additions, each cheap: era
 thresholds monotonically increasing; upgrade tiers strictly ascending in cost;
 every `Balance` table referenced by at least one `_ORDER` list; save/load field
 coverage (every `to_dict` key read by `from_dict`).
 
-That last one is the highest value — it is the check that would have caught the
-`claims` bug where a reloaded empire came back holding a village's tiles.
+Save/load field coverage is done (both directions). What remains: every
+`Balance` table referenced by at least one `_ORDER` list; building `max` caps
+actually respected by the builder; and the reverse of `dead-constants` —
+constants read with a fallback where no declaration exists.
 
-**Effort** 3h · **Impact** medium-high
+**Effort** 3h · **Impact** medium
 
 ### 5.6 🟢 CI could assert exact numbers
 Runs are deterministic now, so the harness could pin exact populations rather

@@ -73,6 +73,7 @@ func _ready() -> void:
 	_test_baseline()
 	_test_engagement()
 	_test_settlements()
+	_test_framerate()
 
 	_restore_profile(saved)
 
@@ -556,6 +557,96 @@ func _test_settlements() -> void:
 	SaveSystem.load_game()
 	if Sim.settlements.size() != 1:
 		_failures.append("settlements: did not survive a save round trip")
+
+
+## A game left running on a fast machine and a game left running on a slow one
+## must arrive at the same place.
+##
+## `advance()` takes whatever real time a frame happened to consume, adds it to
+## an accumulator and spends it in fixed substeps, keeping the remainder - so
+## the outcome should depend on how much time has passed and not at all on how
+## it was delivered. This proves it rather than assuming it, by running the same
+## world twice: once in even steps, once in wildly uneven ones standing in for
+## a machine dropping frames. The two must agree exactly, not approximately.
+func _test_framerate() -> void:
+	print("")
+	print("=== frame rate independence ===")
+
+	var days := 400.0
+	var fields := ["day", "population", "peak_population", "lifetime_output",
+			"carrying_capacity", "snow_depth", "food_satisfaction_avg"]
+
+	# Steady: a machine holding a rock-solid frame rate.
+	Sim.new_game(24601, Balance.WorldType.EARTH)
+	Sim.speed_index = 1
+	var steady_frames := 0
+	var t := 0.0
+	while t < days:
+		Sim.advance(1.0 / 60.0 * Balance.SPEEDS[1] / Balance.SECONDS_PER_DAY)
+		t += 1.0 / 60.0 * Balance.SPEEDS[1] / Balance.SECONDS_PER_DAY
+		steady_frames += 1
+	Sim.advance(0.0)
+	var steady := {}
+	for f in fields:
+		steady[f] = Sim.get(f)
+	steady["jobs"] = Sim.jobs.duplicate()
+	for id in Balance.RESOURCE_ORDER:
+		steady["r_" + id] = float(Sim.resources[id])
+
+	# Juddering: the same elapsed time, delivered in lumps between one and two
+	# hundred milliseconds - a machine thrashing, or a tab coming back to life.
+	_rng.seed = 5150
+	Sim.new_game(24601, Balance.WorldType.EARTH)
+	Sim.speed_index = 1
+	var judder_frames := 0
+	t = 0.0
+	while t < days:
+		var frame := _rng.randf_range(0.001, 0.2)
+		var chunk := frame * Balance.SPEEDS[1] / Balance.SECONDS_PER_DAY
+		chunk = minf(chunk, days - t)
+		Sim.advance(chunk)
+		t += chunk
+		judder_frames += 1
+	Sim.advance(0.0)
+
+	print("%d steady frames vs %d juddering ones over %d days"
+			% [steady_frames, judder_frames, int(days)])
+	# Not zero, and the reason matters. Both passes are handed exactly four
+	# hundred days, but an accumulator summing several hundred thousand floats
+	# lands a hair under the last substep boundary, so the juddering pass spends
+	# 3,999 of 4,000 substeps. One substep in four thousand is the granularity
+	# of the fixed-step design and not something to chase - a quarter of a per
+	# cent is comfortably inside it, and the state leak this test was written to
+	# find moved population by four per cent and reassigned every trade.
+	const TOLERANCE := 0.0025
+	var drift := 0
+	for f in fields:
+		var a: float = float(steady[f])
+		var b: float = float(Sim.get(f))
+		if absf(a - b) > maxf(0.01, absf(a) * TOLERANCE):
+			_failures.append("frame rate: %s is %f at a steady rate and %f when "
+					% [f, a, b] + "frames judder - the simulation depends on how "
+					+ "time is delivered, not just how much")
+			drift += 1
+	for id in Balance.RESOURCE_ORDER:
+		var a2: float = float(steady["r_" + id])
+		var b2: float = float(Sim.resources[id])
+		# Stores get a looser bound than the aggregates above. Population and
+		# output are smooth; a store is spent in lumps, so one substep either
+		# side of a building being paid for moves it by a whole order. Still
+		# nothing like the leak this found, where gold was 0 against 28 and
+		# stone differed twelvefold.
+		if absf(a2 - b2) > maxf(2.0, absf(a2) * 0.08):
+			_failures.append("frame rate: resource %s differs (%f vs %f)" % [id, a2, b2])
+			drift += 1
+	for id in Balance.JOB_ORDER:
+		if int((steady["jobs"] as Dictionary).get(id, 0)) != int(Sim.jobs.get(id, 0)):
+			_failures.append("frame rate: job %s differs (%d vs %d)"
+					% [id, int((steady["jobs"] as Dictionary).get(id, 0)),
+					int(Sim.jobs.get(id, 0))])
+			drift += 1
+	print("%d of %d compared values drifted beyond one substep of tolerance"
+			% [drift, fields.size() + Balance.RESOURCE_ORDER.size() + Balance.JOB_ORDER.size()])
 
 
 func _job_summary() -> String:
