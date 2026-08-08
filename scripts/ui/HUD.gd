@@ -21,6 +21,9 @@ const GOOD := Color("7fbf6a")
 const BAD := Color("d1685e")
 const TECHCOL := Color("b08ad4")
 
+## Interface tick. Subtracted rather than zeroed when it fires, so the cadence
+## is the same at thirty frames a second as at three hundred.
+const REFRESH_INTERVAL := 0.1
 var _refresh_accum := 0.0
 var _dirty := true
 
@@ -146,9 +149,9 @@ func _process(delta: float) -> void:
 	_day_label.text = Balance.fmt_clock(Sim.day)
 
 	_refresh_accum += delta
-	if _refresh_accum < 0.1:
+	if _refresh_accum < REFRESH_INTERVAL:
 		return
-	_refresh_accum = 0.0
+	_refresh_accum -= REFRESH_INTERVAL
 	if Settings.show_fps:
 		_fps_label.text = "%d fps" % Engine.get_frames_per_second()
 	if _dirty:

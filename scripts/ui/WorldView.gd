@@ -77,6 +77,10 @@ var _tex: ImageTexture
 var _buf := PackedByteArray()
 var _terrain_dirty := true
 var _dirty := true
+## Redraw cadences. All three subtract their interval rather than zeroing, so
+## a slow frame does not stretch the next one - at 10fps a 0.066s cloud tick
+## that zeroes itself actually fires every 0.1s.
+const PLACE_INTERVAL := 1.0
 var _rebuild_accum := 0.0
 var _place_accum := 0.0
 var _cloud_accum := 0.0
@@ -172,9 +176,10 @@ func _process(delta: float) -> void:
 		return
 
 	# The terrain image only changes when the fog or the tree cover does.
+	var rebuild_every := 1.0 if Settings.reduce_motion else 0.4
 	_rebuild_accum += delta
-	if _rebuild_accum >= (1.0 if Settings.reduce_motion else 0.4):
-		_rebuild_accum = 0.0
+	if _rebuild_accum >= rebuild_every:
+		_rebuild_accum -= rebuild_every
 		if world.explored_count != _last_explored:
 			_last_explored = world.explored_count
 			_terrain_dirty = true
@@ -184,8 +189,8 @@ func _process(delta: float) -> void:
 			_terrain_dirty = true
 
 	_place_accum += delta
-	if _place_accum >= 1.0:
-		_place_accum = 0.0
+	if _place_accum >= PLACE_INTERVAL:
+		_place_accum -= PLACE_INTERVAL
 		if world.territory.size() != _last_territory:
 			_last_territory = world.territory.size()
 			_worker_spots.clear()
@@ -198,9 +203,10 @@ func _process(delta: float) -> void:
 	# they need a redraw cadence of their own - the ordinary dirty flag fires on
 	# material changes and once a second, which would make both of them judder.
 	if float(Sim.weather_info()["clouds"]) > 0.01 or Sim.sun_elevation() < 0.6:
+		var cloud_every := 0.25 if Settings.reduce_motion else 0.066
 		_cloud_accum += delta
-		if _cloud_accum >= (0.25 if Settings.reduce_motion else 0.066):
-			_cloud_accum = 0.0
+		if _cloud_accum >= cloud_every:
+			_cloud_accum -= cloud_every
 			_dirty = true
 
 	if _terrain_dirty or _dirty:

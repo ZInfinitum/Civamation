@@ -277,6 +277,7 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	_seed_cohorts(6.0)
 	deaths_age = 0.0
 	deaths_hunger = 0.0
+	_reset_runtime_caches()
 	speed_index = 1
 	era = 0
 	techs.clear()
@@ -1310,6 +1311,38 @@ func _check_settlement_points() -> void:
 		add_log("There are enough of you to settle somewhere else. "
 				+ "Found a new settlement from the Rule tab.", "era")
 		_chronicle("Enough people to found a second place to live.", "era")
+
+
+## Everything derived, smoothed or half-finished. None of it belongs to a world
+## and all of it used to survive New World.
+##
+## Found by a frame-rate test that could not reproduce itself: two identical
+## passes over the same seed in one process gave different populations, because
+## the second inherited the first's smoothed yields, its build timer and its
+## leftover fraction of a substep. For the player that is worse than a test
+## nuisance - starting a new world after playing one handed the planner a
+## learned model of a country that no longer existed, so the first minutes were
+## mis-assigned for reasons nothing on screen could explain.
+func _reset_runtime_caches() -> void:
+	_last_gross.clear()
+	_prev_jobs.clear()
+	_stock_targets.clear()
+	_storage.clear()
+	gross_by_job.clear()
+	_assign_timer = 0.0
+	_build_timer = 0.0
+	_accum = 0.0
+	_disaster_cooldown = Balance.DISASTER_INTERVAL_DAYS
+	_total_game = 0.0
+	_total_forage = 0.0
+	_total_forest = 0.0
+	births_per_day = 0.0
+	deaths_per_day = 0.0
+	food_satisfaction = 1.0
+	water_satisfaction = 1.0
+	carrying_capacity = 0.0
+	housing = Balance.BASE_HOUSING
+	tiles_explored_per_day = 0.0
 
 
 ## The cheats. Deliberately plain functions rather than something hidden - they
