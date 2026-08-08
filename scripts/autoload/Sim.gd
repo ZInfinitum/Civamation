@@ -116,6 +116,17 @@ var tutorial_seen: Array[String] = []
 ## with the temperature, so a hard week costs movement well after the sky clears.
 var snow_depth: float = 0.0
 
+## Food satisfaction, averaged over about a day.
+##
+## The instantaneous figure is now a poor thing to judge by or to report: people
+## sleep, so production drops to a fifth of its daily average overnight while
+## eating carries on, and any settlement without a full day in store dips below
+## the famine threshold every single night. A soak sampling on day boundaries -
+## midnight, the worst instant there is - reported four runs in ten as hungry
+## when the settlements were fine. Hunger is a condition that lasts, so it is
+## measured over a period.
+var food_satisfaction_avg: float = 1.0
+
 ## The population, in five-year age bands. `population` is the sum of this and
 ## is kept in step; the cohorts are what actually decide who can work and who
 ## dies. See Balance.COHORT_MORTALITY.
@@ -199,6 +210,11 @@ var _quarry_slots := 0.0
 var _woodlot_slots := 0.0
 var _birth_mult := 1.0
 var _housing_mult := 1.0
+## How many people one worksite building can hold. A farm plot is a plot of
+## ground, and what changes with the plough, drainage and machinery is how many
+## hands that ground can usefully take - which is the only thing that lets food
+## production keep pace with a population housing lets grow.
+var _worksite_mult := 1.0
 var _territory_bonus := 0.0
 
 ## Smoothed per-worker output each job is actually delivering. Potential yield
@@ -278,6 +294,7 @@ func new_game(p_seed: int = 0, p_type: int = Balance.WorldType.EARTH) -> void:
 	weather = 0
 	weather_until = 0.0
 	snow_depth = 0.0
+	food_satisfaction_avg = 1.0
 	tutorial_step = 0
 	tutorial_seen.clear()
 	chronicle.clear()
@@ -2045,6 +2062,10 @@ func _consume_and_grow(dt: float) -> void:
 	food_satisfaction = 1.0 if food_need <= 0.0 else food_got / food_need
 	water_satisfaction = 1.0 if water_need <= 0.0 else water_got / water_need
 
+	# Smoothed over roughly a day, so a night is not a famine.
+	var blend := clampf(dt / 1.0, 0.0, 1.0)
+	food_satisfaction_avg = lerpf(food_satisfaction_avg, food_satisfaction, blend)
+
 	# Liebig's law of the minimum: the scarcest necessity sets the outcome.
 	var need_score := minf(food_satisfaction, water_satisfaction)
 
@@ -2115,15 +2136,15 @@ func _consume_and_grow(dt: float) -> void:
 		k_water = maxf(k_water, population)
 	carrying_capacity = minf(minf(k_food, k_water), housing)
 
-	if need_score < Balance.FAMINE_THRESHOLD:
+	if food_satisfaction_avg < Balance.FAMINE_THRESHOLD:
 		hunger_days += dt
-	if need_score < Balance.FAMINE_THRESHOLD and not _famine_latch:
+	if food_satisfaction_avg < Balance.FAMINE_THRESHOLD and not _famine_latch:
 		_famine_latch = true
 		if food_satisfaction <= water_satisfaction:
 			add_log("There is not enough to eat. The work parties come back with less every day.", "bad")
 		else:
 			add_log("The water runs short. People are drinking from puddles.", "bad")
-	elif need_score > 0.98 and _famine_latch:
+	elif food_satisfaction_avg > 0.98 and _famine_latch:
 		_famine_latch = false
 		add_log("The hungry season passes. There is food again.", "good")
 
@@ -2512,9 +2533,25 @@ func _auto_assign_jobs() -> void:
 	if job_unlocked("farmer") and _farm_plots >= 1.0:
 		y_farm = job_yield_planned("farmer")
 
-	var best := maxf(maxf(y_hunt, y_forage), y_farm)
-	# Ignore any food job yielding under a tenth of the best. A hunted-out herd
-	# should empty the hunting camp, not keep it staffed out of habit.
+	# Ignore any food job yielding under a tenth of the best *alternative that
+	# could actually take the workers*.
+	#
+	# This compared against farming too, and that was the single worst bug in
+	# the game. Farming is plot-limited: once every plot is worked, a farmer
+	# yielding fifty a day can absorb nobody else. Comparing hunters against
+	# that number culled them - so by day five thousand a soak found two hundred
+	# and seventy-three farmers, zero hunters and zero foragers, feeding fifty
+	# thousand people on twenty-nine per cent of what they needed, with the herds
+	# at eighty-five per cent health and thirty thousand workers spare. The
+	# settlement was starving next to full larders it had decided were beneath it.
+	#
+	# The original intent - a hunted-out herd should empty the hunting camp
+	# rather than keep it staffed out of habit - is about the wild trades
+	# relative to each other, so that is what it compares now. Farming only
+	# enters the comparison while it still has empty plots to offer.
+	var best := maxf(y_hunt, y_forage)
+	if y_farm > 0.0 and _farm_plots > float(jobs.get("farmer", 0)):
+		best = maxf(best, y_farm)
 	var floor_y := best * 0.10
 	var wh := 0.0
 	var wf := 0.0
@@ -3300,6 +3337,7 @@ func _rebuild_mods() -> void:
 	_woodlot_slots = 0.0
 	_birth_mult = 1.0
 	_housing_mult = 1.0
+	_worksite_mult = 1.0
 	_territory_bonus = 0.0
 	# Techs pool together, buildings pool together, and the two pools multiply.
 	# Upgrades are the only thing that compounds freely.
@@ -3319,6 +3357,16 @@ func _rebuild_mods() -> void:
 	for kind in _effect_pool:
 		if not tech_pool.has(kind):
 			_yield_mult[kind] = 1.0 + float(_effect_pool[kind])
+
+	# Worksites hold more hands as the technology to work them arrives. Without
+	# this, food production is pinned to the number of plots ever built while
+	# housing keeps growing - so a soak found fifty thousand people fed by two
+	# hundred and seventy-three farmers with three quarters of the workforce
+	# standing idle, because there was nowhere for any of them to stand.
+	_farm_plots *= _worksite_mult
+	_mine_slots *= _worksite_mult
+	_quarry_slots *= _worksite_mult
+	_woodlot_slots *= _worksite_mult
 
 	_legacy_mult = 1.0 + Profile.legacy_points * Balance.LEGACY_BONUS_PER_POINT
 	# Permanent unlocks bought with Legacy, applied before anything else.
@@ -3390,6 +3438,8 @@ func _apply_effects(eff: Dictionary, count: int) -> void:
 				_birth_mult *= pow(float(eff[key]), count)
 			"housing_mult":
 				_housing_mult *= pow(float(eff[key]), count)
+			"worksite_mult":
+				_worksite_mult *= pow(float(eff[key]), count)
 			"territory":
 				_territory_bonus += float(eff[key]) * count
 

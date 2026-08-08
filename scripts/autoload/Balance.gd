@@ -758,7 +758,7 @@ const TECHS := {
 	"irrigation": {
 		"name": "Irrigation", "cost": 220.0, "requires": ["agriculture"], "era": 2,
 		"desc": "Lead the river to the field.",
-		"effects": {"yield_mult": {"farm": 1.5}, "territory": 2.0}
+		"effects": {"worksite_mult": 1.35, "yield_mult": {"farm": 1.5}, "territory": 2.0}
 	},
 	"mountain_paths": {
 		"name": "Mountain Paths", "cost": 240.0, "requires": ["masonry", "wayfinding"], "era": 2,
@@ -773,7 +773,7 @@ const TECHS := {
 	"the_plough": {
 		"name": "The Plough", "cost": 320.0, "requires": ["irrigation", "husbandry"], "era": 2,
 		"desc": "One person, one ox, ten times the ground.",
-		"effects": {"yield_mult": {"farm": 1.6}}
+		"effects": {"worksite_mult": 1.5, "yield_mult": {"farm": 1.6}}
 	},
 	"writing": {
 		"name": "Writing", "cost": 450.0, "requires": ["masonry", "the_plough"], "era": 3,
@@ -829,12 +829,12 @@ const TECHS := {
 	"crop_science": {
 		"name": "Crop Science", "cost": 75000.0, "requires": ["astronomy"], "era": 6,
 		"desc": "Which seed, which soil, which year. Written down and argued over.",
-		"effects": {"yield_mult": {"farm": 2.0, "timber": 1.5}, "birth_mult": 1.1}
+		"effects": {"worksite_mult": 1.8, "yield_mult": {"farm": 2.0, "timber": 1.5}, "birth_mult": 1.1}
 	},
 	"blast_furnace": {
 		"name": "The Blast Furnace", "cost": 105000.0, "requires": ["the_keel"], "era": 6,
 		"desc": "Iron by the ton instead of by the bar.",
-		"effects": {"yield_mult": {"ore": 2.2, "stone": 1.5, "build": 1.4}}
+		"effects": {"worksite_mult": 1.4, "yield_mult": {"ore": 2.2, "stone": 1.5, "build": 1.4}}
 	},
 	"printing": {
 		"name": "Printing", "cost": 150000.0, "requires": ["crop_science", "mathematics"], "era": 6,
@@ -849,12 +849,12 @@ const TECHS := {
 	"mechanisation": {
 		"name": "Mechanisation", "cost": 360000.0, "requires": ["blast_furnace", "printing"], "era": 7,
 		"desc": "Water and gearing doing what arms used to.",
-		"effects": {"yield_mult": {"timber": 2.2, "ore": 1.8, "stone": 1.8, "build": 1.8}}
+		"effects": {"worksite_mult": 1.9, "yield_mult": {"timber": 2.2, "ore": 1.8, "stone": 1.8, "build": 1.8}}
 	},
 	"the_steam_engine": {
 		"name": "The Steam Engine", "cost": 600000.0, "requires": ["mechanisation"], "era": 7,
 		"desc": "Fire turned into motion. Everything after this is a different world.",
-		"effects": {"yield_mult": {"ore": 2.5, "stone": 2.0, "timber": 1.8, "build": 2.0}}
+		"effects": {"worksite_mult": 2.1, "yield_mult": {"ore": 2.5, "stone": 2.0, "timber": 1.8, "build": 2.0}}
 	},
 	"public_health": {
 		"name": "Public Health", "cost": 950000.0, "requires": ["sanitation", "the_steam_engine"], "era": 7,

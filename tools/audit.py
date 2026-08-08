@@ -246,6 +246,83 @@ def check_yield_kinds(bal, code):
     return r
 
 
+def check_effect_keys(bal, sim):
+    """Every key inside an `"effects": {...}` must be one `_apply_effects` reads.
+
+    Written immediately after making this exact mistake: `worksite_mult` was
+    added as a *sibling* of `"effects"` rather than inside it, so the tech
+    granted nothing at all and the game ran perfectly well without it.  A key
+    inside `effects` that the match statement has no arm for fails the same way
+    and just as quietly.
+    """
+    r = Result("effect-keys", hard=True)
+    # The arms of the match in _apply_effects, plus the nested dictionaries it
+    # walks into rather than matching directly.
+    m = re.search(r"func _apply_effects[\s\S]*?\n\tmatch ", sim)
+    body = sim[m.start():m.start() + 3000] if m else sim
+    handled = set(re.findall(r'^\t{2,3}"([a-z_]+)"\s*:\s*$', body, re.M))
+    handled |= {"yield_mult"}
+    # Not every effect goes through the match. `housing` is read straight off
+    # the effects dictionary by _housing_total, and reporting that as dead was
+    # this check's first false positive - so anything read by name anywhere in
+    # Sim.gd counts as handled too.
+    handled |= set(re.findall(r'\.get\(\s*"([a-z_]+)"', sim))
+    if len(handled) < 4:
+        r.hit("Sim.gd", "could not read _apply_effects - the parser needs updating")
+        return r
+
+    seen = set()
+    for const in ("TECHS", "BUILDINGS", "LEGACY_PERKS"):
+        blk = block_of(bal, const)
+        for mm in re.finditer(r'"effects"\s*:\s*\{', blk):
+            # Walk to the matching brace so nested dictionaries are skipped.
+            depth = 0
+            start = mm.end() - 1
+            end = start
+            for i in range(start, len(blk)):
+                if blk[i] == "{":
+                    depth += 1
+                elif blk[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            inner = blk[start:end + 1]
+            for key in top_keys(inner):
+                if key in handled or key in seen:
+                    continue
+                seen.add(key)
+                r.hit(const, "effect '%s' has no arm in _apply_effects - it does nothing"
+                      % key)
+    return r
+
+
+def check_save_coverage(sim, savesystem):
+    """Every field written by `to_dict` must be read back by `from_dict`.
+
+    This is the shape of the bug that made a reloaded empire come back holding
+    a single village's worth of tiles: the state was saved, and nothing read it.
+    A field written and never read is a save that silently loses progress, which
+    is the worst class of bug this game can have.
+    """
+    r = Result("save-coverage", hard=True)
+    m = re.search(r"func to_dict\(\)[\s\S]*?\n\nfunc ", sim)
+    if not m:
+        return r
+    written = set(re.findall(r'^\t\t"([a-z_]+)"\s*:', m.group(0), re.M))
+    loader = sim[sim.find("func from_dict"):]
+    read_back = set(re.findall(r'\.get\(\s*"([a-z_]+)"', loader))
+    # SaveSystem reads some of the envelope itself - `version` is checked there
+    # before Sim ever sees the dictionary, which was this check's other first
+    # false positive.
+    read_back |= set(re.findall(r'\.get\(\s*"([a-z_]+)"', savesystem))
+    # Fields the loader handles by another route than a .get.
+    read_back |= {"world", "log"}
+    for name in sorted(written - read_back):
+        r.hit("Sim.to_dict", "'%s' is saved and never loaded" % name)
+    return r
+
+
 def check_dead_constants(bal, code, listing):
     """Constants in Balance.gd that nothing reads.
 
@@ -395,9 +472,13 @@ def main():
     code_by_file = {p: read(p) for p in gd_files()}
     code = strip_comments("\n".join(code_by_file.values()))
 
+    sim = read(os.path.join(ROOT, "scripts", "autoload", "Sim.gd"))
     results = [
         check_id_references(bal),
         check_yield_kinds(bal, code),
+        check_effect_keys(bal, sim),
+        check_save_coverage(sim, read(os.path.join(
+            ROOT, "scripts", "autoload", "SaveSystem.gd"))),
         check_doc_facts(bal),
     ]
     if not quick:

@@ -105,12 +105,19 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 
 	var elapsed := 0.0
 	var next_sample := 0.0
-	var chunk := 10.0
+	# Deliberately not a whole number of days. Every sample used to land on a
+	# day boundary - midnight - so every reading of anything that varies through
+	# the day was taken at its worst moment.
+	var chunk := 10.37
 	while elapsed < float(days):
 		Sim.simulate_days(chunk, true)
 		elapsed += chunk
 
-		if Sim.food_satisfaction < Balance.FAMINE_THRESHOLD:
+		# The sustained figure. Sampling the instantaneous one on a day boundary
+		# meant sampling midnight every time - the worst instant of the day now
+		# that people sleep - and it reported four runs in ten as hungry when
+		# the settlements were fine.
+		if Sim.food_satisfaction_avg < Balance.FAMINE_THRESHOLD:
 			hungry_days += chunk
 
 		peak = maxf(peak, Sim.population)
@@ -171,7 +178,7 @@ func _run_one(index: int, world_seed: int, days: int, world_type: int) -> void:
 				"seams": Sim.deposits_found(),
 				"seams_total": Sim.deposits_total(),
 				# Is the economy actually in balance, or held up by a floor?
-				"food_sat": Sim.food_satisfaction,
+				"food_sat": Sim.food_satisfaction_avg,
 				"housing": Sim.housing,
 				"forage": Sim.world.stock_health(Sim.world.forage, Sim.world.forage_cap),
 			})
@@ -394,13 +401,20 @@ func _report(days: int) -> void:
 
 
 func _write_csv(path: String) -> void:
+	if _rows.is_empty():
+		return
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		print("could not write %s" % path)
 		return
-	var cols := ["seed", "shape", "day", "pop", "k", "era", "techs", "upgrades",
-			"output", "food", "wood", "ore", "knowledge", "thinkers", "workforce",
-			"herd", "forest", "settlements", "snow", "temp"]
+	# Columns come from the rows themselves. They used to be a hand-written list
+	# that had to be kept in step with what _run_one records, and of course it
+	# was not: eight metrics were added and silently never reached the file, so
+	# the CSV looked complete and was missing exactly the new things it had been
+	# extended for. Deriving them cannot drift.
+	var cols: Array[String] = []
+	for k in (_rows[0] as Dictionary).keys():
+		cols.append(String(k))
 	f.store_line(",".join(cols))
 	for r in _rows:
 		var parts: Array[String] = []
