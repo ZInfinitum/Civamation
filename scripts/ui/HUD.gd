@@ -963,7 +963,9 @@ func _refresh() -> void:
 func _refresh_summary() -> void:
 	var world := Sim.world
 	var trend := "growing" if Sim.births_per_day > Sim.deaths_per_day else "holding steady"
-	if Sim.food_satisfaction < 0.9:
+	# The sustained figure, not the instantaneous one: the settlement dips every
+	# night now that people sleep, and "hungry" every dusk is noise.
+	if Sim.food_satisfaction_avg < 0.9:
 		trend = "hungry"
 	elif Sim.water_satisfaction < 0.9:
 		trend = "short of water"
