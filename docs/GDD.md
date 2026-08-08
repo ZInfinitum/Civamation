@@ -1025,14 +1025,14 @@ The constants that matter most, all from `Balance.gd`.
 | `WORKSITE_COST_GROWTH` | 1.045 | same argument, one level down |
 | `DEFAULT_COST_GROWTH` | 1.15 | where a steep wall belongs |
 | `UPGRADE_MULT` | 1.75 | per owned tier, compounding |
-| `STOCK_REFUGE` | 0.30 | nothing is ever wiped out |
+| `STOCK_REFUGE` | 0.40 | nothing is ever wiped out, and herds live above it |
 | `MIGRANT_EXPONENT` | 0.5 | a band is a band |
 
 ### Ecology
 
 | Constant | Value |
 | --- | --- |
-| `GAME_REGROWTH` | 0.100 / day |
+| `GAME_REGROWTH` | 0.190 / day |
 | `EXPLORE_PER_SCOUT` | 0.85 tiles / day |
 | `FOOD_SPOILAGE` | 3.0% / day |
 | `BASE_TERRITORY_RADIUS` | 3.5 |

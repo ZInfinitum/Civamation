@@ -323,6 +323,271 @@ def check_save_coverage(sim, savesystem):
     return r
 
 
+# A GDScript numeric literal: optional sign, digit separators, an exponent.
+NUM = r"-?\d[\d_]*\.?\d*(?:[eE][-+]?\d+)?"
+
+
+def _num(text):
+    return float(text.replace("_", ""))
+
+
+def _const_number(bal, name):
+    """The literal value of `const NAME := 1.23`, or None."""
+    m = re.search(r"const\s+%s\s*(?::\s*\w+)?\s*:?=\s*(%s)" % (re.escape(name), NUM), bal)
+    return _num(m.group(1)) if m else None
+
+
+def _float_array(bal, name):
+    blk = block_of(bal, name)
+    return [_num(x) for x in re.findall(NUM, blk)] if blk else []
+
+
+def _entry_blocks(block):
+    """Each depth-1 `{ ... }` inside an array block, in order."""
+    out = []
+    depth = 0
+    start = -1
+    for i, c in enumerate(block):
+        if c == "{":
+            depth += 1
+            if depth == 1:
+                start = i
+        elif c == "}":
+            if depth == 1 and start >= 0:
+                out.append(block[start:i + 1])
+            depth -= 1
+    return out
+
+
+def _field(entry, name):
+    m = re.search(r'"%s"\s*:\s*(%s)' % (re.escape(name), NUM), entry)
+    return _num(m.group(1)) if m else None
+
+
+def check_table_shape(bal):
+    """Arrays that are indexed by something with a fixed range.
+
+    `season` is `... % 4` and indexes SEASONS; each WEATHER entry's `weight` is
+    indexed by season; COHORT_MORTALITY is indexed by cohort.  A table one entry
+    short does not fail to parse - it reads out of range at runtime, or worse,
+    silently returns the wrong row for the last case.  None of these has bitten
+    yet precisely because they are easy to get right and impossible to notice
+    when you do not.
+    """
+    r = Result("table-shape", hard=True)
+
+    cohorts = _const_number(bal, "COHORT_COUNT")
+    mort = _float_array(bal, "COHORT_MORTALITY")
+    if cohorts and len(mort) != int(cohorts):
+        r.hit("COHORT_MORTALITY", "has %d entries, COHORT_COUNT is %d - the last "
+              "bands would read out of range" % (len(mort), int(cohorts)))
+
+    for name in ("WORK_START_COHORT", "WORK_END_COHORT", "ELDER_START_COHORT"):
+        v = _const_number(bal, name)
+        if v is not None and cohorts and not (0 <= v < cohorts):
+            r.hit(name, "is %d, outside 0..%d" % (int(v), int(cohorts) - 1))
+
+    seasons = _entry_blocks(block_of(bal, "SEASONS"))
+    if len(seasons) != 4:
+        r.hit("SEASONS", "has %d entries; season is computed modulo 4" % len(seasons))
+    for i, entry in enumerate(_entry_blocks(block_of(bal, "WEATHER"))):
+        w = re.search(r'"weight"\s*:\s*\[([^\]]*)\]', entry)
+        n = len(re.findall(NUM, w.group(1))) if w else 0
+        if n != len(seasons):
+            r.hit("WEATHER[%d]" % i, "has %d season weights, there are %d seasons"
+                  % (n, len(seasons)))
+    return r
+
+
+def check_monotonic(bal):
+    """Ladders that must only ever go up.
+
+    An era whose population threshold is below the one before it is reached at
+    the same moment as its predecessor, so the earlier era is never seen.  An
+    upgrade tier that costs less than the one below it is bought out of order.
+    Every one of these is legal data and silently wrong.
+    """
+    r = Result("monotonic", hard=True)
+
+    def ascending(label, values, strict=True):
+        for i in range(1, len(values)):
+            bad = values[i] <= values[i - 1] if strict else values[i] < values[i - 1]
+            if bad:
+                r.hit(label, "entry %d is %s, after %s" % (i, values[i], values[i - 1]))
+
+    eras = _entry_blocks(block_of(bal, "ERAS"))
+    ascending("ERAS pop", [_field(e, "pop") for e in eras][1:])
+    ascending("ERAS techs", [_field(e, "techs") for e in eras][1:])
+
+    tiers = _entry_blocks(block_of(bal, "UPGRADE_TIERS"))
+    ascending("UPGRADE_TIERS output", [_field(t, "output") for t in tiers])
+    ascending("UPGRADE_TIERS cost", [_field(t, "cost") for t in tiers])
+
+    ascending("MILESTONES", [_field(m, "pop") for m in
+                             _entry_blocks(block_of(bal, "MILESTONES"))])
+    ascending("ORE_TIERS value", [_field(t, "value") for t in
+                                  _entry_blocks(block_of(bal, "ORE_TIERS"))])
+    ascending("ROAD_TIERS reach", [_field(t, "reach") for t in
+                                   _entry_blocks(block_of(bal, "ROAD_TIERS"))])
+    ascending("SETTLEMENT_POP_THRESHOLDS", _float_array(bal, "SETTLEMENT_POP_THRESHOLDS"))
+    ascending("PEOPLE_PER_FIGURE_STEPS", _float_array(bal, "PEOPLE_PER_FIGURE_STEPS"))
+    return r
+
+
+def check_tech_graph(bal):
+    """The tech tree must be a reachable, acyclic graph with sane costs.
+
+    A cycle makes both techs permanently unresearchable and nothing anywhere
+    reports it.  So does a prerequisite on a tech that is itself unreachable.
+    And a tech cheaper than something it depends on is not a bug exactly, but it
+    is always a mistake - it means the ladder has a rung out of order.
+    """
+    r = Result("tech-graph", hard=True)
+    blk = block_of(bal, "TECHS")
+    ids = top_keys(blk)
+    reqs, costs = {}, {}
+    for name in ids:
+        i = blk.index('"%s":' % name)
+        j = blk.find('\n\t},', i)
+        entry = blk[i:j if j > 0 else len(blk)]
+        reqs[name] = [x for x in strings_under(entry, "requires") if x]
+        costs[name] = _field(entry, "cost")
+
+    # Reachability from the roots, which are the techs with no prerequisites.
+    reached = set()
+    frontier = [n for n in ids if not reqs[n]]
+    reached.update(frontier)
+    changed = True
+    while changed:
+        changed = False
+        for name in ids:
+            if name in reached:
+                continue
+            if all(p in reached for p in reqs[name]):
+                reached.add(name)
+                changed = True
+    for name in ids:
+        if name not in reached:
+            r.hit("TECHS", "'%s' can never be researched - its prerequisites are "
+                  "unreachable or cyclic" % name)
+
+    return r
+
+
+def check_enum_coverage(bal):
+    """Every value of an enum that a table is keyed by must appear in it.
+
+    A biome in the enum with no BIOME_INFO row generates land the game cannot
+    describe, colour or harvest, and finds out at runtime on whichever seed
+    happens to produce it.
+    """
+    r = Result("enum-coverage", hard=True)
+    m = re.search(r"enum\s+Biome\s*\{([^}]*)\}", strip_comments(bal))
+    if not m:
+        return r
+    members = [x.strip() for x in m.group(1).split(",") if x.strip()]
+    info = block_of(bal, "BIOME_INFO")
+    for name in members:
+        if ("Biome.%s:" % name) not in info:
+            r.hit("BIOME_INFO", "no row for Biome.%s" % name)
+
+    # ANIMALS lists habitats as raw enum indices, which is exactly the sort of
+    # thing that survives a reordering of the enum without anyone noticing.
+    for entry in _entry_blocks(block_of(bal, "ANIMALS")):
+        b = re.search(r'"biomes"\s*:\s*\[([^\]]*)\]', entry)
+        if not b:
+            continue
+        for v in re.findall(r"\d+", b.group(1)):
+            if int(v) >= len(members):
+                r.hit("ANIMALS", "lives in biome %s, but there are only %d biomes"
+                      % (v, len(members)))
+    return r
+
+
+def check_shader_uniforms(code):
+    """Uniforms set from GDScript must exist, and declared ones must be set.
+
+    `set_shader_parameter` takes a string.  Misspell it and the call succeeds,
+    returns nothing, and the shader quietly keeps its default - which for the
+    hex terrain would mean a map that renders at the wrong scale or not at all,
+    with no error anywhere.
+    """
+    r = Result("shader-uniforms", hard=True)
+    sh_dir = os.path.join(ROOT, "shaders")
+    if not os.path.isdir(sh_dir):
+        return r
+    declared = set()
+    for n in os.listdir(sh_dir):
+        if n.endswith(".gdshader"):
+            declared |= set(re.findall(r"^uniform\s+\w+\s+(\w+)", read(os.path.join(sh_dir, n)), re.M))
+    used = set(re.findall(r'set_shader_parameter\(\s*"(\w+)"', code))
+    for name in sorted(used - declared):
+        r.hit("set_shader_parameter", "'%s' is not a uniform in any shader" % name)
+    for name in sorted(declared - used):
+        r.note += ("  " if r.note else "") + ("uniform '%s' keeps its default" % name)
+    return r
+
+
+def check_input_actions(code):
+    """Input actions read by code must be registered, and vice versa."""
+    r = Result("input-actions", hard=True)
+    proj = os.path.join(ROOT, "project.godot")
+    if not os.path.exists(proj):
+        return r
+    text = read(proj)
+    section = text.split("[input]", 1)
+    if len(section) < 2:
+        return r
+    body = section[1].split("\n[", 1)[0]
+    declared = set(re.findall(r"^(\w+)=\{", body, re.M))
+    used = set(re.findall(r'is_action_(?:just_)?(?:pressed|released)\(\s*"(\w+)"', code))
+    for name in sorted(used - declared):
+        # Godot's own ui_* actions are built in and need no registration.
+        if name.startswith("ui_") and name in ("ui_accept", "ui_cancel", "ui_left",
+                                               "ui_right", "ui_up", "ui_down", "ui_focus_next"):
+            continue
+        r.hit("project.godot", "action '%s' is read but never registered" % name)
+    for name in sorted(declared - used):
+        r.hit("project.godot", "action '%s' is registered and never read" % name)
+    return r
+
+
+def check_doc_constants(bal):
+    """Constants quoted in the documents against what Balance.gd says.
+
+    The GDD carries a whole balance-reference table of hand-copied numbers.
+    STOCK_REFUGE was written there as 0.30 and had been 0.40 in the code for a
+    week.  Numbers transcribed by hand rot; this is the cheapest possible
+    version of generating them instead.
+    """
+    r = Result("doc-constants", hard=True)
+    docs = [os.path.join(ROOT, "README.md")]
+    for base, _, names in os.walk(os.path.join(ROOT, DOC_DIR)):
+        docs += [os.path.join(base, n) for n in names if n.endswith(".md")]
+    for path in docs:
+        if not os.path.exists(path):
+            continue
+        lines = read(path).split("\n")
+        for i, line in enumerate(lines):
+            if exempt(lines, i, "doc-constants"):
+                continue
+            # `CONSTANT_NAME` followed by a number somewhere on the same line.
+            m = re.search(r"`([A-Z][A-Z0-9_]{3,})`[^\d\-]*\**(%s)" % NUM, line)
+            if not m:
+                continue
+            # A figure given as a percentage is a restatement, not the literal.
+            if line[m.end(2):m.end(2) + 1] == "%":
+                continue
+            real = _const_number(bal, m.group(1))
+            if real is None:
+                continue
+            claimed = float(m.group(2))
+            if abs(claimed - real) > 1e-9:
+                r.hit("%s:%d" % (os.path.relpath(path, ROOT), i + 1),
+                      "%s documented as %g, code says %g" % (m.group(1), claimed, real))
+    return r
+
+
 def check_dead_constants(bal, code, listing):
     """Constants in Balance.gd that nothing reads.
 
@@ -477,6 +742,13 @@ def main():
         check_id_references(bal),
         check_yield_kinds(bal, code),
         check_effect_keys(bal, sim),
+        check_table_shape(bal),
+        check_monotonic(bal),
+        check_tech_graph(bal),
+        check_enum_coverage(bal),
+        check_shader_uniforms(code),
+        check_input_actions(code),
+        check_doc_constants(bal),
         check_save_coverage(sim, read(os.path.join(
             ROOT, "scripts", "autoload", "SaveSystem.gd"))),
         check_doc_facts(bal),
